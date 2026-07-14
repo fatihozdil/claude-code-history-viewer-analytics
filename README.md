@@ -1,6 +1,11 @@
 # Claude Code History Search Analytics
 
 Browse, search, inspect, and resume Claude Code, OpenAI Codex,  and Antigravity AGY CLI conversations — directly inside VS Code.
+---
+You can support this project by giving a star on GitHub ⭐️ or by becoming an sponsor 💰
+
+[![Buy Me A Coffee](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png)](https://buymeacoffee.com/fatihozdil)
+
 
 ## Multi-provider session browser
 
@@ -90,12 +95,6 @@ Browse, search, inspect, and resume Claude Code, OpenAI Codex,  and Antigravity 
 
 Found a bug or have a feature request? Use the **Feedback** button in the sidebar, or open an issue directly:
 [github.com/fatihozdil/claude-code-history-viewer-analytics/issues](https://github.com/fatihozdil/claude-code-history-viewer-analytics/issues)
-
-## Support
-
-If this extension is useful to you, consider buying me a coffee:
-
-[![Buy Me A Coffee](https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png)](https://buymeacoffee.com/fatihozdil)
 
 ## Documentation
 
