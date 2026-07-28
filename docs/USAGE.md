@@ -30,15 +30,14 @@ Each card shows:
 - **Pin / Unpin** — pinned sessions float to the top of every sort and persist across restarts
 - **Archive / Unarchive** — archived sessions disappear from the normal list and from search results; persists across restarts
 
-## Conversation Viewer
+Both locations are watched. New active sessions and appended turns normally appear
+after the short watcher debounce without restarting VS Code. A thread name from
+Codex's local `session_index.jsonl` is used when available; otherwise the first user
+message becomes the title.
 
 Opens in its own panel and renders:
 
-- **User messages** — with a blue header
-- **Assistant messages** — with a green header, including Markdown formatting
-- **Tool calls** — collapsed by default; click to expand and see the full input
-- **Tool outputs** — shown inline below the corresponding tool call
-- **Code blocks** — with syntax highlighting
+The viewer supports both providers and renders:
 
 Search results scroll you directly to the matching message with a highlight animation.
 
@@ -71,4 +70,19 @@ Click the **Feedback** button in the sidebar to open a GitHub issue against the 
 
 ## Configuration
 
-Open VS Code Settings (`Cmd+,`) and search for `claudeHistory` to see all options.
+Open Settings and search for `claudeHistory`. This namespace is retained for
+backward compatibility even though both providers are supported.
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `claudeHistory.claudeDirPath` | `""` | Claude Code data directory; empty uses `~/.claude`. |
+| `claudeHistory.codexDirPath` | `""` | Codex data directory; empty uses `$CODEX_HOME`, then `~/.codex`. |
+| `claudeHistory.maxIndexedFileSizeMB` | `50` | Maximum session size indexed. |
+| `claudeHistory.autoRefreshInterval` | `0` | Optional fallback polling interval in seconds. |
+| `claudeHistory.inheritTheme` | `true` | Follow the current VS Code theme. |
+| `claudeHistory.defaultSort` | `"newest"` | Initial sort order. |
+| `claudeHistory.defaultDisplayMode` | `"expanded"` | Initial row density. |
+| `claudeHistory.showArchivedByDefault` | `false` | Start in the archived list. |
+
+Reload the VS Code window after changing a provider directory so its watchers use
+the new path.

@@ -98,8 +98,14 @@ Found a bug or have a feature request? Use the **Feedback** button in the sideba
 
 ## Documentation
 
-More details: [Usage Guide](https://github.com/fatihozdil/claude-code-history-viewer-analytics/blob/main/USAGE.md), [Privacy Statement](https://github.com/fatihozdil/claude-code-history-viewer-analytics/blob/main/PRIVACY.md), and [Changelog](https://github.com/fatihozdil/claude-code-history-viewer-analytics/blob/main/CHANGELOG.md).
+More details: [Usage Guide](https://github.com/fatihozdil/claude-code-history-viewer-analytics/blob/main/docs/USAGE.md), [Privacy Statement](https://github.com/fatihozdil/claude-code-history-viewer-analytics/blob/main/docs/PRIVACY.md), and [Changelog](https://github.com/fatihozdil/claude-code-history-viewer-analytics/blob/main/CHANGELOG.md).
+
+## Contributing
+
+Fork the repo, make your change, and open a pull request — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the build, test, and local-install steps.
+Pull requests run the test suite automatically. Releases are cut by the maintainer.
 
 ## License
 
-Proprietary — all rights reserved. See [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE).

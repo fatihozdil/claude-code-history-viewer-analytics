@@ -1,0 +1,270 @@
+{
+  "name": "claude-code-history-search-analytics",
+  "displayName": "Claude & Codex History Search Analytics",
+  "description": "Browse, search, inspect, analyze, and resume Claude Code, Codex and Antigravity conversations directly inside VS Code.",
+  "version": "1.13.3",
+  "publisher": "Fatih-Ozdil",
+  "license": "MIT",
+  "icon": "media/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fatihozdil/claude-code-history-viewer-analytics.git"
+  },
+  "galleryBanner": {
+    "color": "#1e1e1e",
+    "theme": "dark"
+  },
+  "qna": "marketplace",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other",
+    "Visualization"
+  ],
+  "keywords": [
+    "claude",
+    "claude code",
+    "codex",
+    "openai codex",
+    "coding agents",
+    "history",
+    "conversations",
+    "local",
+    "search",
+    "analytics",
+    "quota",
+    "cost tracking",
+    "privacy"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:claudeHistory.browser",
+    "onCommand:claudeHistory.refresh",
+    "onCommand:claudeHistory.reindex",
+    "onCommand:claudeHistory.openAnalytics",
+    "onCommand:claudeHistory.openSettings"
+  ],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "claudeHistory",
+          "title": "Claude & Codex History",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "claudeHistory": [
+        {
+          "id": "claudeHistory.browser",
+          "name": "Browser",
+          "type": "webview",
+          "contextualTitle": "Claude & Codex History"
+        }
+      ]
+    },
+    "viewsWelcome": [],
+    "commands": [
+      {
+        "command": "claudeHistory.refresh",
+        "title": "Refresh",
+        "category": "Claude & Codex History",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "claudeHistory.reindex",
+        "title": "Rebuild Search Index",
+        "category": "Claude & Codex History"
+      },
+      {
+        "command": "claudeHistory.openSession",
+        "title": "Open Conversation",
+        "category": "Claude & Codex History",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "claudeHistory.openFile",
+        "title": "Open File",
+        "category": "Claude & Codex History",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "claudeHistory.openDiff",
+        "title": "Open Diff",
+        "category": "Claude & Codex History",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "claudeHistory.openAnalytics",
+        "title": "Open Analytics Dashboard",
+        "category": "Claude & Codex History"
+      },
+      {
+        "command": "claudeHistory.openSettings",
+        "title": "Open Settings",
+        "category": "Claude & Codex History",
+        "icon": "$(settings-gear)"
+      },
+      {
+        "command": "claudeHistory.resume.copy",
+        "title": "Copy Resume Command",
+        "category": "Claude & Codex History",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "claudeHistory.resume.run",
+        "title": "Resume in Terminal",
+        "category": "Claude & Codex History",
+        "icon": "$(play)"
+      },
+      {
+        "command": "claudeHistory.resume.openInClaudeTab",
+        "title": "Open in Claude Tab",
+        "category": "Claude History",
+        "icon": "$(comment-discussion)"
+      }
+    ],
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "claudeHistory.openFile",
+          "when": "view == claudeHistory.fileChanges && viewItem == fileChange",
+          "group": "inline"
+        },
+        {
+          "command": "claudeHistory.openDiff",
+          "when": "view == claudeHistory.fileChanges && viewItem == fileChange && viewItem =~ /fileChange/",
+          "group": "inline"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Claude Code History Search Analytics",
+      "properties": {
+        "claudeHistory.claudeDirPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the Claude Code data directory. Leave empty to use `~/.claude`."
+        },
+        "claudeHistory.codexDirPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the Codex data directory. Leave empty to use `$CODEX_HOME` when set, otherwise `~/.codex`."
+        },
+        "claudeHistory.agyDirPath": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the Antigravity data directory. Leave empty to use `~/.gemini/antigravity-cli` when present, otherwise `~/.gemini/antigravity`."
+        },
+        "claudeHistory.autoRefreshInterval": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "Fallback polling interval in seconds for re-scanning Claude Code and Codex sessions. `0` disables polling (file watchers still detect changes live)."
+        },
+        "claudeHistory.enableSearchIndexing": {
+          "type": "boolean",
+          "default": true,
+          "description": "Build and maintain the full-text search index. Disable to save resources if you do not use search."
+        },
+        "claudeHistory.maxIndexedFileSizeMB": {
+          "type": "number",
+          "default": 50,
+          "description": "Skip indexing session files larger than this size (in megabytes)."
+        },
+        "claudeHistory.quota.fiveHourTokenBudget": {
+          "type": "number",
+          "default": 0,
+          "description": "Override the Claude 5-hour token budget (0 = auto-detect from plan tier). Used for the local Claude quota estimate in the status bar."
+        },
+        "claudeHistory.quota.weeklyTokenBudget": {
+          "type": "number",
+          "default": 0,
+          "description": "Override the Claude 7-day token budget (0 = auto-detect from plan tier)."
+        },
+        "claudeHistory.quota.statusBarProviders": {
+          "type": "array",
+          "default": [
+            "claude",
+            "codex"
+          ],
+          "items": {
+            "type": "string",
+            "enum": [
+              "claude",
+              "gemini",
+              "codex",
+              "deepseek",
+              "agy"
+            ]
+          },
+          "uniqueItems": true,
+          "maxItems": 2,
+          "description": "Providers to show in the status bar (at most two). Hover to see usage and estimated API cost for every provider."
+        },
+        "claudeHistory.inheritTheme": {
+          "type": "boolean",
+          "default": true,
+          "description": "Render the conversation viewer using the current VS Code color theme."
+        },
+        "claudeHistory.defaultSort": {
+          "type": "string",
+          "enum": [
+            "newest",
+            "oldest",
+            "messages",
+            "activity"
+          ],
+          "enumDescriptions": [
+            "Date (newest)",
+            "Date (oldest)",
+            "Most messages",
+            "Most recent activity"
+          ],
+          "default": "newest",
+          "description": "Default sort order for the session list (used until you change it via the toolbar)."
+        },
+        "claudeHistory.defaultDisplayMode": {
+          "type": "string",
+          "enum": [
+            "expanded",
+            "compact"
+          ],
+          "default": "expanded",
+          "description": "Default display density for the session list."
+        },
+        "claudeHistory.showArchivedByDefault": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show archived sessions in the list by default."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run build",
+    "build": "node esbuild.js --production",
+    "watch": "node esbuild.js --watch",
+    "compile-tests": "node -e \"require('node:fs').rmSync('out-test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json",
+    "test": "npm run compile-tests && node --test './out-test/test/**/*.test.js'",
+    "typecheck": "tsc --noEmit",
+    "package": "vsce package --allow-missing-repository",
+    "release": "scripts/publish-release.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/codicons": "^0.0.45",
+    "@vscode/vsce": "^2.32.0",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.4.0"
+  },
+  "dependencies": {
+    "highlight.js": "^11.9.0",
+    "markdown-it": "^14.1.0",
+    "preact": "^10.29.2",
+    "sql.js": "^1.10.3"
+  }
+}

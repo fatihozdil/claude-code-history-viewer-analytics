@@ -1,0 +1,513 @@
+/* src/webview/ui/styles.css */
+/* Uses VS Code CSS custom properties exclusively. No hardcoded colors. */
+
+/* ---- Reset & Base ---- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
+  color: var(--vscode-sideBar-foreground);
+  background: var(--vscode-sideBar-background);
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* ---- Header ---- */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--vscode-sideBar-border);
+  flex-shrink: 0;
+}
+.header__icon { width: 16px; height: 16px; }
+.header__title {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 600;
+}
+.header__refresh {
+  background: none;
+  border: none;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+}
+.header__refresh:hover { background: var(--vscode-toolbar-hoverBackground); }
+.header__settings {
+  margin-left: 2px;
+  color: var(--vscode-foreground);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  padding: 2px;
+  border-radius: 3px;
+  font-size: 14px;
+  line-height: 1;
+}
+.header__settings:hover { background: var(--vscode-toolbar-hoverBackground); }
+
+/* ---- Toolbar ---- */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--vscode-sideBar-border);
+  flex-shrink: 0;
+}
+.toolbar__row {
+  display: flex;
+  gap: 6px;
+  width: 100%;
+}
+.toolbar select,
+.toolbar input {
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.toolbar select:focus,
+.toolbar input:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  border-color: var(--vscode-focusBorder);
+}
+.toolbar__project { min-width: 110px; flex: 1; }
+.toolbar__provider { min-width: 105px; }
+.provider-picker { display: flex; align-items: center; gap: 4px; position: relative; }
+.provider-picker__trigger, .provider-picker__option { display: flex; align-items: center; gap: 5px; color: var(--vscode-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border); border-radius: 3px; padding: 2px 6px; font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap; }
+.provider-picker__trigger:hover, .provider-picker__option:hover { background: var(--vscode-toolbar-hoverBackground); }
+.provider-picker__menu { position: absolute; z-index: 20; top: calc(100% + 3px); left: 0; min-width: 130px; padding: 3px; display: flex; flex-direction: column; gap: 2px; background: var(--vscode-menu-background); border: 1px solid var(--vscode-menu-border); box-shadow: 0 3px 8px var(--vscode-widget-shadow); }
+.provider-picker__option { width: 100%; border: 0; border-radius: 2px; text-align: left; background: transparent; color: var(--vscode-menu-foreground); }
+.provider-logo {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 16px; height: 16px; border-radius: 4px;
+  color: #fff; font-size: 10px; font-weight: 700; flex: 0 0 16px;
+}
+.provider-logo--all { background: #7c6ee6; }
+.provider-logo--claude { background: transparent; color: #d97757; }
+.provider-logo--codex { background: var(--vscode-foreground); color: var(--vscode-editor-background); border-radius: 50%; font-size: 12px; font-weight: 700; }
+.provider-logo--agy { background: linear-gradient(140deg, #4285f4 18%, #34a853 42%, #fbbc05 62%, #ea4335 86%); }
+.provider-logo--deepseek { background: #4b6bfb; }
+.provider-logo svg { width: 100%; height: 100%; fill: currentColor; }
+.toolbar__search { min-width: 120px; flex: 2; }
+.toolbar__sort { min-width: 90px; }
+.toolbar__toggle {
+  background: none;
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 3px;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 12px;
+  white-space: nowrap;
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+.toolbar__toggle:hover { background: var(--vscode-toolbar-hoverBackground); }
+.toolbar__toggle--active {
+  background: var(--vscode-inputOption-activeBackground);
+  color: var(--vscode-inputOption-activeForeground);
+  border-color: var(--vscode-inputOption-activeBorder);
+}
+
+/* ---- Session List ---- */
+.session-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ---- Session Card ----
+   Fixed 3-column grid: icon | body | actions.
+   Every row reserves the same column widths so nothing shifts. */
+.session-card {
+  display: grid;
+  grid-template-columns: 16px 1fr auto;
+  column-gap: 6px;
+  align-items: center;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-left: 3px solid transparent;
+  min-height: 28px;
+  position: relative;
+}
+.session-card:hover { background: var(--vscode-list-hoverBackground); }
+.session-card--pinned { border-left-color: var(--vscode-textLink-foreground); }
+.session-card--provider-claude { box-shadow: inset 2px 0 #d97757; }
+.session-card--provider-codex { box-shadow: inset 2px 0 var(--vscode-foreground); }
+.session-card--provider-agy { box-shadow: inset 2px 0 #4285f4; }
+.session-card--pinned { box-shadow: inset 3px 0 var(--vscode-textLink-foreground); }
+.session-card--archived .session-card__title { color: var(--vscode-disabledForeground); }
+
+.session-card__icon {
+  width: 16px;
+  font-size: 13px;
+  line-height: 1;
+  text-align: center;
+}
+
+.session-card__body { min-width: 0; }
+
+.session-card__heading {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.session-card__provider {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex-shrink: 0;
+  padding: 1px 5px 1px 3px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 13px;
+}
+
+.session-card__provider-logo { display: inline-flex; align-items: center; justify-content: center; width: 11px; height: 11px; min-width: 11px; font-size: 10px; line-height: 1; }
+
+.session-card__provider--claude {
+  color: #d97757;
+  background: color-mix(in srgb, #d97757 14%, transparent);
+  border-color: color-mix(in srgb, #d97757 28%, transparent);
+}
+
+.session-card__provider--codex {
+  color: var(--vscode-foreground);
+  background: color-mix(in srgb, var(--vscode-foreground) 10%, transparent);
+  border-color: color-mix(in srgb, var(--vscode-foreground) 22%, transparent);
+}
+
+.session-card__provider--agy {
+  color: #4285f4;
+  background: color-mix(in srgb, #4285f4 14%, transparent);
+  border-color: color-mix(in srgb, #4285f4 28%, transparent);
+}
+
+.session-card--compact .session-card__provider { padding: 1px 4px; font-size: 0; }
+.session-card--compact .session-card__provider-logo { font-size: 10px; }
+
+.session-card__title {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-card__title-input {
+  width: 100%;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.4;
+  padding: 1px 3px;
+  background: var(--vscode-input-background);
+  color: var(--vscode-input-foreground);
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 2px;
+  outline: none;
+}
+.session-card__title-input:focus {
+  outline: 1px solid var(--vscode-focusBorder);
+  border-color: var(--vscode-focusBorder);
+}
+
+.session-card__meta {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-card--compact .session-card__meta { display: none; }
+.session-card--compact .session-card__title::after {
+  content: " · " attr(data-meta);
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.session-card__actions {
+  display: none;
+  flex-shrink: 0;
+  gap: 2px;
+  margin-left: 8px;
+}
+.session-card:hover .session-card__actions { display: flex; }
+
+.session-card__action {
+  background: none;
+  border: none;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 13px;
+  line-height: 1;
+}
+.session-card__action:hover { background: var(--vscode-toolbar-hoverBackground); }
+
+/* ---- Empty State ---- */
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--vscode-descriptionForeground);
+  font-size: 13px;
+  gap: 8px;
+}
+.empty-state__icon { font-size: 32px; opacity: 0.4; }
+.empty-state__secondary {
+  max-width: 260px;
+  font-size: 11px;
+  text-align: center;
+}
+
+/* ---- Context Menu ---- */
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  background: var(--vscode-menu-background);
+  border: 1px solid var(--vscode-menu-border);
+  border-radius: 4px;
+  padding: 4px 0;
+  min-width: 180px;
+  box-shadow: 0 2px 8px var(--vscode-widget-shadow);
+}
+.context-menu__item {
+  display: block;
+  width: 100%;
+  padding: 4px 12px;
+  background: none;
+  border: none;
+  color: var(--vscode-menu-foreground);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+.context-menu__item:hover { background: var(--vscode-menu-selectionBackground); }
+.context-menu__separator {
+  height: 1px;
+  background: var(--vscode-menu-separatorBackground);
+  margin: 4px 8px;
+}
+
+/* ---- Loading ---- */
+.loading-bar {
+  height: 2px;
+  background: var(--vscode-progressBar-background);
+  flex-shrink: 0;
+}
+
+/* ---- Keyboard focus ---- */
+.session-card:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: -1px;
+  background: var(--vscode-list-activeSelectionBackground);
+  color: var(--vscode-list-activeSelectionForeground);
+}
+.session-card:focus-within .session-card__actions { display: flex; }
+
+/* ---- Summary bar ---- */
+.summary-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+  border-bottom: 1px solid var(--vscode-sideBar-border);
+  flex-shrink: 0;
+}
+
+/* Branch sessions — grouped in a tinted panel, mirroring the subagent panel style. */
+.branch-group {
+  margin: 2px 10px 6px 30px;
+  background: color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground) 22%, transparent);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.branch-group .session-card--branch {
+  border-left: none;
+  margin-left: 0;
+  padding: 4px 10px;
+}
+.branch-group .session-card--branch + .session-card--branch {
+  border-top: 1px solid color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground) 18%, transparent);
+}
+.branch-group .session-card--branch:hover {
+  background: color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground) 14%, transparent);
+}
+
+/* Subagent badge — an interactive pill in the metadata line */
+.session-card__subagent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: middle;
+  color: var(--vscode-editorInfo-foreground, #3794ff);
+  background: color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 28%, transparent);
+  transition: background 0.1s ease;
+}
+.session-card__subagent-badge:hover {
+  background: color-mix(in srgb, var(--vscode-editorInfo-foreground, #3794ff) 22%, transparent);
+}
+.session-card__subagent-badge:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+/* Branch badge — mirrors the subagent badge, tinted to match the branch panel */
+.session-card__branch-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: middle;
+  color: var(--vscode-gitDecoration-addedResourceForeground, #81b88b);
+  background: color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #81b88b) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #81b88b) 28%, transparent);
+  transition: background 0.1s ease;
+}
+.session-card__branch-badge:hover {
+  background: color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #81b88b) 22%, transparent);
+}
+.session-card__branch-badge:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder);
+  outline-offset: 1px;
+}
+
+.session-card__badge-chevron {
+  font-size: 9px;
+  opacity: 0.8;
+  margin-left: 2px;
+}
+
+/* Possible fork — heuristic IDE-fork link. Dashed + desaturated to read as
+   lower-confidence than the solid branch treatment. */
+.session-card__possible-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  user-select: none;
+  font-size: 11px;
+  font-weight: 500;
+  vertical-align: middle;
+  white-space: nowrap;
+  color: var(--vscode-descriptionForeground);
+  background: color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #81b88b) 6%, transparent);
+  border: 1px dashed color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #81b88b) 45%, transparent);
+}
+
+.branch-group .session-card--possible-fork {
+  border-left: 2px dashed color-mix(in srgb, var(--vscode-gitDecoration-addedResourceForeground, #81b88b) 40%, transparent);
+}
+.branch-group .session-card--possible-fork .session-card__icon {
+  opacity: 0.6;
+}
+
+/* Subagent panel — appears under the parent card, aligned with its body column.
+   The left margin accounts for: card border(3px) + padding(8px) + icon(16px) +
+   gap(6px) = 33px, rounded to 30px */
+.subagent-group {
+  margin: 2px 10px 6px 30px;
+  background: color-mix(in srgb, var(--vscode-editorInfo-foreground) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--vscode-editorInfo-foreground) 22%, transparent);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.subagent-group .session-card--subagent {
+  border-left: none;
+  margin-left: 0;
+  padding: 4px 10px;
+  grid-template-columns: 16px 1fr auto;
+}
+.subagent-group .session-card--subagent + .session-card--subagent {
+  border-top: 1px solid color-mix(in srgb, var(--vscode-editorInfo-foreground) 18%, transparent);
+}
+.subagent-group .session-card--subagent:hover {
+  background: color-mix(in srgb, var(--vscode-editorInfo-foreground) 14%, transparent);
+}
+.subagent-group .session-card--loading {
+  padding: 6px 10px;
+}
+
+/* Search results: match count chip + snippet preview */
+.session-card__match-badge {
+  font-size: 0.8em;
+  opacity: 0.7;
+}
+
+.session-card__snippet {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--vscode-descriptionForeground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-card__snippet mark {
+  background: var(--vscode-editor-findMatchHighlightBackground, var(--vscode-list-focusOutline));
+  color: inherit;
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+.session-card--loading {
+  opacity: 0.6;
+  pointer-events: none;
+  padding: 6px 8px;
+}
+
+.session-card--antigravity .session-card__icon {
+  color: var(--vscode-charts-purple, #b180f2) !important;
+  opacity: 1 !important;
+}
