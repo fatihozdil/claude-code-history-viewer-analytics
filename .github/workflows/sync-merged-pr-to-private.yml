@@ -25,11 +25,15 @@ jobs:
           fetch-depth: 0
 
       - name: Build patch for the merged PR
+        # Diffing merge_commit_sha^1 (main's tip before the merge) against
+        # merge_commit_sha (main's tip after) gives the PR's total changeset
+        # whether it landed as a squash, a real merge commit, or a rebase —
+        # unlike `git format-patch`, which only handles a single commit and
+        # silently mishandles actual two-parent merge commits.
         run: |
-          git format-patch -1 "${{ github.event.pull_request.merge_commit_sha }}" --stdout > /tmp/pr.patch
+          git diff "${{ github.event.pull_request.merge_commit_sha }}"^1 "${{ github.event.pull_request.merge_commit_sha }}" > /tmp/pr.diff
           echo "--- patch summary ---"
-          diffstat=$(git diff --stat "${{ github.event.pull_request.merge_commit_sha }}"^ "${{ github.event.pull_request.merge_commit_sha }}")
-          echo "$diffstat"
+          git diff --stat "${{ github.event.pull_request.merge_commit_sha }}"^1 "${{ github.event.pull_request.merge_commit_sha }}"
 
       - name: Checkout private repo
         uses: actions/checkout@v4
@@ -43,24 +47,30 @@ jobs:
         working-directory: private-repo
         env:
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if git apply --check --reverse /tmp/pr.patch 2>/dev/null; then
+          if [ ! -s /tmp/pr.diff ]; then
+            echo "Empty diff (nothing to sync — likely a docs/CI-only PR already excluded from the mirror) — nothing to do."
+            exit 0
+          fi
+
+          if git apply --check --reverse /tmp/pr.diff 2>/dev/null; then
             echo "Patch already present in private repo (identical content) — nothing to do."
             exit 0
           fi
 
-          if ! git am --3way --keep-non-patch /tmp/pr.patch; then
-            git am --abort || true
-            echo "::error::Patch from public PR #$PR_NUMBER ($PR_URL) did not apply cleanly to private main. Apply it by hand: gh pr diff $PR_NUMBER | git apply -3 (in the private repo), then commit and push."
+          if ! git apply --check /tmp/pr.diff 2>/dev/null; then
+            echo "::error::Diff from public PR #$PR_NUMBER ($PR_URL) did not apply cleanly to private main. Apply it by hand: gh pr diff $PR_NUMBER | git apply (in the private repo), then commit and push."
             exit 1
           fi
 
-          trailer=$(printf 'Merged as public PR #%s by @%s\n%s' "$PR_NUMBER" "$PR_AUTHOR" "$PR_URL")
-          git commit --amend -m "$(git log -1 --format=%B)" -m "$trailer"
+          git apply /tmp/pr.diff
+          git add -A
+          git commit -m "$PR_TITLE" -m "Merged as public PR #$PR_NUMBER by @$PR_AUTHOR" -m "$PR_URL"
 
           git push origin main
