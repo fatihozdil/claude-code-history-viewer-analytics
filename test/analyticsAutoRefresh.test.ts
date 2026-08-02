@@ -8,8 +8,13 @@ import * as path from "node:path";
 // mock (see test/extensionQuotaBar.test.ts). So the wiring is asserted at the
 // source level; the timer semantics themselves are covered properly by
 // test/pollTimer.test.ts against the vscode-free helper.
-function repoFile(rel: string): Promise<string> {
-  return fs.readFile(path.resolve(__dirname, "../../", rel), "utf8");
+// The assertions below anchor on "\n" plus indentation, so a CRLF checkout
+// (git's default on Windows) leaves a stray "\r" that the anchors cannot
+// absorb. Normalize on read so the assertions describe the source, not the
+// contributor's core.autocrlf setting.
+async function repoFile(rel: string): Promise<string> {
+  const src = await fs.readFile(path.resolve(__dirname, "../../", rel), "utf8");
+  return src.replace(/\r\n/g, "\n");
 }
 
 test("AnalyticsPanel starts a poll timer and clears it on dispose", async () => {

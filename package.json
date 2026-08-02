@@ -248,7 +248,7 @@
     "build": "node esbuild.js --production",
     "watch": "node esbuild.js --watch",
     "compile-tests": "node -e \"require('node:fs').rmSync('out-test',{recursive:true,force:true})\" && tsc -p tsconfig.test.json",
-    "test": "npm run compile-tests && node --test './out-test/test/**/*.test.js'",
+    "test": "npm run compile-tests && node --test \"./out-test/test/**/*.test.js\"",
     "typecheck": "tsc --noEmit",
     "package": "vsce package --allow-missing-repository",
     "release": "scripts/publish-release.sh"
