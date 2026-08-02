@@ -1,0 +1,66 @@
+name: Sync merged PR into private repo
+
+# Runs after a maintainer merges a PR into this (public) repo's main branch.
+# Since merging is already the maintainer's approval step, this pushes the
+# same change straight to the private -src repo's main with no further
+# review gate. If the patch doesn't apply cleanly, the job fails loudly
+# instead of silently dropping the change — go apply it by hand.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout public repo
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Build patch for the merged PR
+        run: |
+          git format-patch -1 "${{ github.event.pull_request.merge_commit_sha }}" --stdout > /tmp/pr.patch
+          echo "--- patch summary ---"
+          diffstat=$(git diff --stat "${{ github.event.pull_request.merge_commit_sha }}"^ "${{ github.event.pull_request.merge_commit_sha }}")
+          echo "$diffstat"
+
+      - name: Checkout private repo
+        uses: actions/checkout@v4
+        with:
+          repository: fatihozdil/claude-code-history-viewer-analytics-src
+          token: ${{ secrets.PRIVATE_REPO_PAT }}
+          path: private-repo
+          fetch-depth: 0
+
+      - name: Apply patch and push directly to private main
+        working-directory: private-repo
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git apply --check --reverse /tmp/pr.patch 2>/dev/null; then
+            echo "Patch already present in private repo (identical content) — nothing to do."
+            exit 0
+          fi
+
+          if ! git am --3way --keep-non-patch /tmp/pr.patch; then
+            git am --abort || true
+            echo "::error::Patch from public PR #$PR_NUMBER ($PR_URL) did not apply cleanly to private main. Apply it by hand: gh pr diff $PR_NUMBER | git apply -3 (in the private repo), then commit and push."
+            exit 1
+          fi
+
+          trailer=$(printf 'Merged as public PR #%s by @%s\n%s' "$PR_NUMBER" "$PR_AUTHOR" "$PR_URL")
+          git commit --amend -m "$(git log -1 --format=%B)" -m "$trailer"
+
+          git push origin main
