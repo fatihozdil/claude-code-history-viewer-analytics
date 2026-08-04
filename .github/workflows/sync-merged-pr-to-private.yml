@@ -5,8 +5,16 @@ name: Sync merged PR into private repo
 # same change straight to the private -src repo's main with no further
 # review gate. If the patch doesn't apply cleanly, the job fails loudly
 # instead of silently dropping the change — go apply it by hand.
+#
+# Uses pull_request_target, not pull_request: contributor PRs come from
+# forks, and `pull_request` withholds repo secrets (PRIVATE_REPO_PAT) from
+# fork-triggered runs, which fails the private-repo checkout with "Input
+# required and not supplied: token". pull_request_target gets secrets, and
+# is safe here specifically because the job never checks out or executes
+# the PR's head ref/code — it only diffs merge_commit_sha^1..merge_commit_sha,
+# both already-merged commits on the base repo's main.
 on:
-  pull_request:
+  pull_request_target:
     types: [closed]
     branches: [main]
 
