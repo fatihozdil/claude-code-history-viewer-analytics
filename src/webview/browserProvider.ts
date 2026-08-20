@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { ListStateStore } from "../services/listState.js";
-import { listSessionCards, type SessionCard } from "../services/sessionListQuery.js";
+import { listSessionCards, compareBySort, type SessionCard } from "../services/sessionListQuery.js";
 import { listProjects } from "../services/sessionService.js";
 import {
   setArchived, setPinned, setCustomTitle, getCustomTitles, setForkDismissed, getDismissedForks,
@@ -126,7 +126,9 @@ export class BrowserProvider implements vscode.WebviewViewProvider {
 
       case "setSort":
         this._listState.set({ sort: msg.sort as any });
-        this._pushState();
+        // Re-run the active search: the webview keeps its result list on a plain
+        // state push, so a sort change would otherwise be invisible while searching.
+        await this._refreshView();
         break;
 
       case "toggleCompact": {
@@ -395,6 +397,8 @@ export class BrowserProvider implements vscode.WebviewViewProvider {
         const ct = customTitles[card.sessionId];
         if (ct) card.title = ct;
       }
+      // FTS match order is not a sort mode - apply the selected one.
+      cards.sort(compareBySort(this._listState.get().sort));
       this._view?.webview.postMessage({
         type: "searchResults",
         sessions: cards,
