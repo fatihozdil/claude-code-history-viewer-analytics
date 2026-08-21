@@ -2,7 +2,7 @@
 
 All notable changes to this extension are documented in this file.
 
-## [Unreleased]
+## [1.13.4] - 2026-08-21
 
 ### Fixed
 - **Sorting now works on search results** — Switching between Newest, Oldest, Most messages, Recent activity, Cost or Impact while a search was active left the result list untouched: search results were emitted in raw match order and a sort change only refreshed the unfiltered list the webview was not showing. The sort is now applied to search results and re-runs the active search. Cost sorting keeps sessions without a recorded cost after real $0 ones, matching the SQL ordering.
