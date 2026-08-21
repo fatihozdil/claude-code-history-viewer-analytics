@@ -187,6 +187,16 @@ test("compareBySort orders in-memory cards like the SQL ORDER BY", () => {
   assert.deepEqual(ids("impact"), ["c", "a", "b"]);
 });
 
+test("compareBySort sorts sessions without a cost after real $0 ones", () => {
+  const paid = makeCard({ sessionId: "a-paid", cost: 0.5 });
+  const zero = makeCard({ sessionId: "z-zero", cost: 0 });
+  const unknown = makeCard({ sessionId: "a-null", cost: null });
+  const other = makeCard({ sessionId: "b-null", cost: null });
+  const sorted = [unknown, zero, other, paid].sort(compareBySort("cost")).map((x) => x.sessionId);
+  // Nulls last (SQLite ORDER BY cost DESC), then session_id ASC among them.
+  assert.deepEqual(sorted, ["a-paid", "z-zero", "a-null", "b-null"]);
+});
+
 test("compareBySort floats pinned sessions to the top of every sort", () => {
   const pinnedOld = makeCard({ sessionId: "pinned", updatedAt: "2026-01-01T00:00:00Z", pinned: true });
   const recent = makeCard({ sessionId: "recent", updatedAt: "2026-01-09T00:00:00Z" });

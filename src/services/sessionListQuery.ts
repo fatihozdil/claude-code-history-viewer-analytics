@@ -45,6 +45,17 @@ const ORDER_BY: Record<SortMode, string> = {
 };
 
 /**
+ * Descending cost with SQLite's NULL placement: `ORDER BY cost DESC` puts rows
+ * without a recorded cost after every numeric one, so a null must never tie
+ * with a real $0 session.
+ */
+function costDesc(a: number | null, b: number | null): number {
+  if (a == null) return b == null ? 0 : 1;
+  if (b == null) return -1;
+  return b - a;
+}
+
+/**
  * In-memory equivalent of `ORDER BY pinned DESC, ORDER_BY[sort], session_id ASC`.
  * Used for result sets that never go through the list query - search results are
  * hydrated by id and would otherwise stay in raw FTS match order.
@@ -55,7 +66,7 @@ export function compareBySort(sort: SortMode): (a: SessionCard, b: SessionCard) 
       case "oldest": return (a.updatedAt || "").localeCompare(b.updatedAt || "");
       case "messages": return (b.messageCount || 0) - (a.messageCount || 0);
       case "activity": return (b.mtimeMs || 0) - (a.mtimeMs || 0);
-      case "cost": return (b.cost || 0) - (a.cost || 0);
+      case "cost": return costDesc(a.cost, b.cost);
       case "impact":
         return ((b.linesAdded || 0) + (b.linesRemoved || 0)) - ((a.linesAdded || 0) + (a.linesRemoved || 0));
       default: return (b.updatedAt || "").localeCompare(a.updatedAt || "");
