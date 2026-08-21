@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildSessionListSql, groupWithBranches, computeBranchCounts } from "../src/services/sessionListQuery.js";
-import type { SessionCard } from "../src/services/sessionListQuery.js";
+import { buildSessionListSql, groupWithBranches, computeBranchCounts, compareBySort } from "../src/services/sessionListQuery.js";
+import type { SessionCard, SortMode } from "../src/services/sessionListQuery.js";
 
 test("hides archived by default", () => {
   const { sql, params } = buildSessionListSql({ sort: "newest", showArchived: false });
@@ -172,4 +172,33 @@ test("computeBranchCounts does not count an ungrouped branch toward its old root
   const byId = new Map(grouped.map((c) => [c.sessionId, c]));
   assert.equal(byId.get("parent")!.branchCount, 0);
   assert.equal(byId.get("branch")!.branchCount, 0);
+});
+
+test("compareBySort orders in-memory cards like the SQL ORDER BY", () => {
+  const a = makeCard({ sessionId: "a", updatedAt: "2026-01-01T00:00:00Z", messageCount: 5, cost: 1, linesAdded: 10, mtimeMs: 1 });
+  const b = makeCard({ sessionId: "b", updatedAt: "2026-01-03T00:00:00Z", messageCount: 1, cost: 9, linesAdded: 2, mtimeMs: 9 });
+  const c = makeCard({ sessionId: "c", updatedAt: "2026-01-02T00:00:00Z", messageCount: 3, cost: 5, linesAdded: 99, mtimeMs: 5 });
+  const ids = (sort: SortMode) => [a, b, c].sort(compareBySort(sort)).map((x) => x.sessionId);
+  assert.deepEqual(ids("newest"), ["b", "c", "a"]);
+  assert.deepEqual(ids("oldest"), ["a", "c", "b"]);
+  assert.deepEqual(ids("messages"), ["a", "c", "b"]);
+  assert.deepEqual(ids("activity"), ["b", "c", "a"]);
+  assert.deepEqual(ids("cost"), ["b", "c", "a"]);
+  assert.deepEqual(ids("impact"), ["c", "a", "b"]);
+});
+
+test("compareBySort sorts sessions without a cost after real $0 ones", () => {
+  const paid = makeCard({ sessionId: "a-paid", cost: 0.5 });
+  const zero = makeCard({ sessionId: "z-zero", cost: 0 });
+  const unknown = makeCard({ sessionId: "a-null", cost: null });
+  const other = makeCard({ sessionId: "b-null", cost: null });
+  const sorted = [unknown, zero, other, paid].sort(compareBySort("cost")).map((x) => x.sessionId);
+  // Nulls last (SQLite ORDER BY cost DESC), then session_id ASC among them.
+  assert.deepEqual(sorted, ["a-paid", "z-zero", "a-null", "b-null"]);
+});
+
+test("compareBySort floats pinned sessions to the top of every sort", () => {
+  const pinnedOld = makeCard({ sessionId: "pinned", updatedAt: "2026-01-01T00:00:00Z", pinned: true });
+  const recent = makeCard({ sessionId: "recent", updatedAt: "2026-01-09T00:00:00Z" });
+  assert.deepEqual([recent, pinnedOld].sort(compareBySort("newest")).map((x) => x.sessionId), ["pinned", "recent"]);
 });
