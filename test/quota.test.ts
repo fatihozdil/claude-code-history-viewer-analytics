@@ -11,6 +11,8 @@ import {
   resolveQuota,
   readLiveUsageCache,
   writeLiveUsageCache,
+  resolveUsagePollMs,
+  MIN_USAGE_POLL_SECONDS,
 } from "../src/services/quota.js";
 
 /** A throwaway cache path so tests never touch the real ~/.claude file. */
@@ -456,4 +458,29 @@ test("writeLiveUsageCache + readLiveUsageCache round-trip", () => {
   // sanity: it really wrote JSON
   assert.doesNotThrow(() => JSON.parse(readFileSync(path, "utf8")));
   rmSync(path, { force: true });
+});
+
+// ---------------------------------------------------------------------------
+// resolveUsagePollMs
+// ---------------------------------------------------------------------------
+
+test("resolveUsagePollMs disables polling for 0 and for negative values", () => {
+  assert.equal(resolveUsagePollMs(0), null);
+  assert.equal(resolveUsagePollMs(-30), null);
+});
+
+test("resolveUsagePollMs clamps a too-small interval up to the floor", () => {
+  assert.equal(resolveUsagePollMs(90), MIN_USAGE_POLL_SECONDS * 1000);
+  assert.equal(resolveUsagePollMs(299), MIN_USAGE_POLL_SECONDS * 1000);
+});
+
+test("resolveUsagePollMs honours an interval at or above the floor", () => {
+  assert.equal(resolveUsagePollMs(300), 300_000);
+  assert.equal(resolveUsagePollMs(900), 900_000);
+});
+
+test("resolveUsagePollMs falls back to the default for non-numeric input", () => {
+  assert.equal(resolveUsagePollMs(undefined), 300_000);
+  assert.equal(resolveUsagePollMs("600"), 300_000);
+  assert.equal(resolveUsagePollMs(Number.NaN), 300_000);
 });

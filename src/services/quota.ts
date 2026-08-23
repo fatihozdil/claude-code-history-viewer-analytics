@@ -455,9 +455,32 @@ export function writeLiveUsageCache(cache: LiveUsageCache, path?: string): void 
 const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 
 // Within this window of a successful capture, serve the cache without a network
-// call. Long enough to absorb bursts (status-bar poll + panel opens), short
-// enough that an explicit, spaced-out refresh still re-fetches.
-const CACHE_SOFT_TTL_MS = 90 * 1000; // 90s
+// call. This value, not any timer, is what decides how often we actually hit
+// the endpoint: the status bar refreshes on every file-watcher event and on
+// most user commands, so anything shorter turns into a poll at that rate.
+//
+// The endpoint enforces its rate budget per account and shares it with every
+// other Claude client signed in as the same user, so a short interval starves
+// those clients out. 300s is the floor we allow; users running other usage
+// tools can raise it further.
+export const MIN_USAGE_POLL_SECONDS = 300;
+export const DEFAULT_USAGE_POLL_SECONDS = 300;
+const CACHE_SOFT_TTL_MS = DEFAULT_USAGE_POLL_SECONDS * 1000;
+
+/**
+ * Turn the configured `claudeHistory.quota.claudeUsagePollSeconds` value into a
+ * usable interval. Returns null when the user disabled live polling, and a
+ * millisecond value clamped to `MIN_USAGE_POLL_SECONDS` otherwise. Anything
+ * that is not a finite number falls back to the default.
+ */
+export function resolveUsagePollMs(configured: unknown): number | null {
+  const seconds =
+    typeof configured === "number" && Number.isFinite(configured)
+      ? configured
+      : DEFAULT_USAGE_POLL_SECONDS;
+  if (seconds <= 0) return null;
+  return Math.max(seconds, MIN_USAGE_POLL_SECONDS) * 1000;
+}
 
 function cacheIsUsable(now: Date, cache: LiveUsageCache): boolean {
   if (now.getTime() - cache.capturedAtMs > CACHE_MAX_AGE_MS) return false;
