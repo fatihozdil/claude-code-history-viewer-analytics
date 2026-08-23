@@ -86,7 +86,7 @@ You can support this project by giving a star on GitHub ⭐️ or by becoming an
 | `claudeHistory.enableSearchIndexing` | `true` | Build and maintain the full-text search index. |
 | `claudeHistory.maxIndexedFileSizeMB` | `50` | Skip indexing session files larger than this. |
 | `claudeHistory.autoRefreshInterval` | `0` | Fallback polling interval (seconds). `0` = off. The file watcher handles live detection. |
-| `claudeHistory.quota.claudeUsagePollSeconds` | `300` | How often the live Claude usage endpoint may be polled (seconds). `0` = off, showing the cached reading or the local token estimate instead. Values above `0` are raised to at least `300`, because the endpoint's rate budget is shared with every other Claude client on the same account. Also skipped whenever `"claude"` is not in `claudeHistory.quota.statusBarProviders`. After the server rate-limits the endpoint (HTTP 429), polling stops until its `Retry-After` window elapses, clamped between 5 minutes and 24 hours. |
+| `claudeHistory.quota.claudeUsagePollSeconds` | `300` | How often the live Claude usage endpoint may be polled (seconds). Values above `0` are raised to at least `300`. `0` = off, showing the cached reading or the local token estimate instead. |
 | `claudeHistory.inheritTheme` | `true` | Conversation viewer follows the VS Code color theme. |
 | `claudeHistory.defaultSort` | `"newest"` | Default sort order: newest, oldest, messages, activity. |
 | `claudeHistory.defaultDisplayMode` | `"expanded"` | Default display density: expanded or compact. |
