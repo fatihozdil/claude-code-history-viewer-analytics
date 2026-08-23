@@ -13,6 +13,11 @@ import {
   writeLiveUsageCache,
   resolveUsagePollMs,
   MIN_USAGE_POLL_SECONDS,
+  parseRetryAfterMs,
+  noteRateLimited,
+  isRateLimited,
+  clearRateLimit,
+  fetchLiveUsage,
 } from "../src/services/quota.js";
 
 /** A throwaway cache path so tests never touch the real ~/.claude file. */
@@ -679,4 +684,103 @@ test("resolveQuota with allowLive:false never calls fetch, even when the cache c
     assert.equal(attempts(), 0);
     assert.equal(result.source, "estimate");
   });
+});
+
+// ---------------------------------------------------------------------------
+// 429 back-off
+// ---------------------------------------------------------------------------
+
+test("parseRetryAfterMs floors a missing or zero Retry-After at five minutes", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  assert.equal(parseRetryAfterMs(null, now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("0", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("30", now), 5 * 60_000);
+});
+
+test("parseRetryAfterMs honours a Retry-After longer than the floor", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  assert.equal(parseRetryAfterMs("900", now), 900_000);
+  assert.equal(parseRetryAfterMs(new Date(now + 20 * 60_000).toUTCString(), now), 20 * 60_000);
+});
+
+test("parseRetryAfterMs falls back to the floor for unparsable input", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  assert.equal(parseRetryAfterMs("soon", now), 5 * 60_000);
+});
+
+test("parseRetryAfterMs caps an absurd Retry-After at 24 hours", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  assert.equal(parseRetryAfterMs("99999999999", now), 24 * 3600_000);
+  assert.equal(parseRetryAfterMs(new Date(now + 400 * 86400_000).toUTCString(), now), 24 * 3600_000);
+  assert.equal(parseRetryAfterMs("1e400", now), 5 * 60_000); // Infinity is not finite
+});
+
+test("noteRateLimited suppresses fetches until the window passes", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  clearRateLimit();
+  try {
+    assert.equal(isRateLimited(now), false);
+    noteRateLimited("0", now);
+    assert.equal(isRateLimited(now + 60_000), true);
+    assert.equal(isRateLimited(now + 5 * 60_000), false);
+  } finally {
+    clearRateLimit();
+  }
+});
+
+test("fetchLiveUsage records the back-off window on a 429 and clears it on success", async () => {
+  const realFetch = globalThis.fetch;
+  clearRateLimit();
+  try {
+    globalThis.fetch = (async () => ({
+      ok: false,
+      status: 429,
+      headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? "0" : null) },
+    })) as unknown as typeof globalThis.fetch;
+    assert.equal(await fetchLiveUsage("test-token"), null);
+    assert.equal(isRateLimited(Date.now() + 60_000), true);
+
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({
+        five_hour: { utilization: 10, resets_at: new Date(Date.now() + 3600_000).toISOString() },
+        seven_day: { utilization: 5, resets_at: new Date(Date.now() + 86400_000).toISOString() },
+      }),
+    })) as unknown as typeof globalThis.fetch;
+    const ok = await fetchLiveUsage("test-token");
+    assert.equal(ok?.five_hour?.utilization, 10);
+    assert.equal(isRateLimited(Date.now() + 60_000), false);
+  } finally {
+    globalThis.fetch = realFetch;
+    clearRateLimit();
+  }
+});
+
+test("resolveQuota does not fetch while rate-limited", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  clearRateLimit();
+  noteRateLimited("0", Date.now());
+  try {
+    // No cache to fall back through and force:true, so only the rate-limit
+    // gate stands between this call and a real network fetch. withCountedFetch
+    // counts attempts directly: the returned object alone (source: "estimate")
+    // would look identical whether the gate held or a failed fetch produced
+    // the same fallback, so the count is what actually proves the gate held.
+    await withCountedFetch(async (attempts) => {
+      const result = await resolveQuota({
+        now,
+        claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+        queryDb: () => ({ total: 0 }),
+        liveCache: null,
+        cachePath: tmpCachePath(),
+        force: true,
+      });
+      assert.equal(attempts(), 0);
+      assert.equal(result.source, "estimate");
+    });
+  } finally {
+    clearRateLimit();
+  }
 });

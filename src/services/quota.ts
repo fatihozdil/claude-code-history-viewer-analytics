@@ -372,6 +372,53 @@ export function readOAuthAccessToken(): string | null {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Rate-limit back-off
+//
+// The endpoint answers 429 with `Retry-After: 0` once the account's sliding
+// hour window is full, which is an invitation to retry immediately and the
+// exact reason a fast poller keeps every other client starved. We treat any
+// 429 as a saturated window and stay off the endpoint for at least five
+// minutes, honouring a longer Retry-After when the server sends one.
+// ---------------------------------------------------------------------------
+
+const RATE_LIMIT_MIN_BACKOFF_MS = 5 * 60 * 1000;
+// A ceiling as well as a floor: a single absurd Retry-After, from a bug or a
+// tampered response, must not disable live usage for the rest of the session.
+const RATE_LIMIT_MAX_BACKOFF_MS = 24 * 60 * 60 * 1000;
+let rateLimitedUntilMs = 0;
+
+/** Milliseconds to wait after a 429, clamped between five minutes and a day. */
+export function parseRetryAfterMs(header: string | null, nowMs: number): number {
+  const clamp = (ms: number): number =>
+    Math.min(Math.max(ms, RATE_LIMIT_MIN_BACKOFF_MS), RATE_LIMIT_MAX_BACKOFF_MS);
+  if (!header) return RATE_LIMIT_MIN_BACKOFF_MS;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds)) {
+    return clamp(seconds * 1000);
+  }
+  const at = Date.parse(header);
+  if (!Number.isNaN(at)) {
+    return clamp(at - nowMs);
+  }
+  return RATE_LIMIT_MIN_BACKOFF_MS;
+}
+
+/** Record that the endpoint refused us, and for how long to stay away. */
+export function noteRateLimited(header: string | null, nowMs: number): void {
+  rateLimitedUntilMs = nowMs + parseRetryAfterMs(header, nowMs);
+}
+
+/** True while the back-off window from the last 429 is still open. */
+export function isRateLimited(nowMs: number): boolean {
+  return nowMs < rateLimitedUntilMs;
+}
+
+/** Drop the back-off window. Called on a successful fetch, and by tests. */
+export function clearRateLimit(): void {
+  rateLimitedUntilMs = 0;
+}
+
 /**
  * Fetch the live usage payload. Returns null when there is no token, the
  * request fails, or it times out — callers should fall back to the estimate.
@@ -393,7 +440,13 @@ export async function fetchLiveUsage(
       signal: controller.signal,
     });
     clearTimeout(timer);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 429) {
+        noteRateLimited(res.headers.get("retry-after"), Date.now());
+      }
+      return null;
+    }
+    clearRateLimit();
     return (await res.json()) as RawUsageResponse;
   } catch {
     return null;
@@ -584,7 +637,7 @@ export async function resolveQuota(opts?: {
   //    displays nothing live passes allowLive:false and skips straight to the
   //    cache and the estimate below, so a hidden panel never spends a request
   //    from the shared per-account rate budget.
-  const allowLive = opts?.allowLive ?? true;
+  const allowLive = (opts?.allowLive ?? true) && !isRateLimited(now.getTime());
   const raw =
     opts?.liveUsage !== undefined ? opts.liveUsage : allowLive ? await fetchLiveUsage() : null;
   if (raw) {
