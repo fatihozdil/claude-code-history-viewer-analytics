@@ -13,6 +13,7 @@ import {
   writeLiveUsageCache,
   resolveUsagePollMs,
   MIN_USAGE_POLL_SECONDS,
+  MAX_USAGE_POLL_SECONDS,
   parseRetryAfterMs,
   noteRateLimited,
   isRateLimited,
@@ -527,6 +528,16 @@ test("resolveUsagePollMs clamps a too-small interval up to the floor", () => {
 test("resolveUsagePollMs honours an interval at or above the floor", () => {
   assert.equal(resolveUsagePollMs(300), 300_000);
   assert.equal(resolveUsagePollMs(900), 900_000);
+});
+
+test("resolveUsagePollMs caps an interval that setInterval could not represent", () => {
+  // setInterval degrades any delay above 2^31-1 ms to 1 ms, so an uncapped
+  // "once a month" value would busy-loop against the endpoint the floor
+  // protects. Every oversized input has to land on the ceiling instead.
+  assert.equal(resolveUsagePollMs(MAX_USAGE_POLL_SECONDS), MAX_USAGE_POLL_SECONDS * 1000);
+  assert.equal(resolveUsagePollMs(2_592_000), MAX_USAGE_POLL_SECONDS * 1000);
+  assert.equal(resolveUsagePollMs(Number.MAX_SAFE_INTEGER), MAX_USAGE_POLL_SECONDS * 1000);
+  assert.ok(resolveUsagePollMs(2_592_000)! <= 2_147_483_647);
 });
 
 test("resolveUsagePollMs falls back to the default for non-numeric input", () => {

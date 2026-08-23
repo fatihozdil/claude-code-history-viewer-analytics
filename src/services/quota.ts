@@ -517,14 +517,20 @@ const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 // those clients out. 300s is the floor we allow; users running other usage
 // tools can raise it further.
 export const MIN_USAGE_POLL_SECONDS = 300;
+// The resolved value is handed to setInterval, which silently degrades any
+// delay above 2^31-1 ms to 1 ms. Someone writing 2592000 for "once a month"
+// would turn the poll into a busy loop against the very endpoint the floor
+// above exists to protect, so cap the interval at a day.
+export const MAX_USAGE_POLL_SECONDS = 24 * 60 * 60;
 export const DEFAULT_USAGE_POLL_SECONDS = 300;
 const CACHE_SOFT_TTL_MS = DEFAULT_USAGE_POLL_SECONDS * 1000;
 
 /**
  * Turn the configured `claudeHistory.quota.claudeUsagePollSeconds` value into a
  * usable interval. Returns null when the user disabled live polling, and a
- * millisecond value clamped to `MIN_USAGE_POLL_SECONDS` otherwise. Anything
- * that is not a finite number falls back to the default.
+ * millisecond value clamped into `[MIN_USAGE_POLL_SECONDS,
+ * MAX_USAGE_POLL_SECONDS]` otherwise. Anything that is not a finite number
+ * falls back to the default.
  */
 export function resolveUsagePollMs(configured: unknown): number | null {
   const seconds =
@@ -532,7 +538,7 @@ export function resolveUsagePollMs(configured: unknown): number | null {
       ? configured
       : DEFAULT_USAGE_POLL_SECONDS;
   if (seconds <= 0) return null;
-  return Math.max(seconds, MIN_USAGE_POLL_SECONDS) * 1000;
+  return Math.min(Math.max(seconds, MIN_USAGE_POLL_SECONDS), MAX_USAGE_POLL_SECONDS) * 1000;
 }
 
 function cacheIsUsable(now: Date, cache: LiveUsageCache): boolean {
