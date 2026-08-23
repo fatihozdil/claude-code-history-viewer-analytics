@@ -421,7 +421,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         e.affectsConfiguration("claudeHistory.quota.statusBarProviders") ||
         e.affectsConfiguration("claudeHistory.quota.claudeUsagePollSeconds")
       ) {
-        updateQuotaStatus(quotaItem);
+        // The user just changed the quota setting, so a fresh reading is
+        // what they asked for.
+        updateQuotaStatus(quotaItem, { live: true });
+        armQuotaTimer();
       }
       if (e.affectsConfiguration("claudeHistory.autoRefreshInterval")) {
         const newInterval = vscode.workspace
@@ -450,8 +453,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   quotaItem.show();
   context.subscriptions.push(quotaItem);
   let quotaUpdateGeneration = 0;
+  let quotaTimer: ReturnType<typeof setInterval> | null = null;
 
-  async function updateQuotaStatus(item: vscode.StatusBarItem): Promise<void> {
+  // Re-arms the live quota poll on the interval from
+  // claudeHistory.quota.claudeUsagePollSeconds, clearing whatever timer is
+  // currently running first. Called once at activation and again whenever
+  // the setting changes, so a new interval (or turning polling off) takes
+  // effect without a window reload.
+  function armQuotaTimer(): void {
+    if (quotaTimer) clearInterval(quotaTimer);
+    quotaTimer = null;
+    const pollMs = resolveUsagePollMs(
+      vscode.workspace.getConfiguration("claudeHistory.quota").get("claudeUsagePollSeconds", 300),
+    );
+    if (pollMs === null) return;
+    quotaTimer = setInterval(() => updateQuotaStatus(quotaItem, { live: true }), pollMs);
+  }
+
+  async function updateQuotaStatus(item: vscode.StatusBarItem, opts?: { live?: boolean }): Promise<void> {
     const generation = ++quotaUpdateGeneration;
     try {
       const quotaConfig = vscode.workspace.getConfiguration("claudeHistory.quota");
@@ -461,11 +480,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         .slice(0, 2);
       // The Claude entry is the only thing here that needs a live server
       // reading. When it is not on the status bar, or the user turned polling
-      // off, resolve from cache/estimate instead of spending a request.
+      // off, resolve from cache/estimate instead of spending a request. Most
+      // callers are session-list repaints (refresh, pin, sort, the watcher…)
+      // that have nothing to do with the usage endpoint, so they leave
+      // opts.live unset and this always resolves to false for them.
       const pollMs = resolveUsagePollMs(quotaConfig.get("claudeUsagePollSeconds", 300));
       const quota = await resolveQuota({
         ...(pollMs !== null ? { softTtlMs: pollMs } : {}),
-        allowLive: pollMs !== null && providers.includes("claude"),
+        allowLive: opts?.live === true && pollMs !== null && providers.includes("claude"),
       });
       const agyUsage = providers.includes("agy") ? await readAgyUsage(agyDir) : null;
       const codexUsage = providers.includes("codex") ? await readCodexUsage(codexDir) : null;
@@ -586,10 +608,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return "<1m";
   }
 
-  updateQuotaStatus(quotaItem);
-
-  const quotaTimer = setInterval(() => updateQuotaStatus(quotaItem), 5 * 60 * 1000);
-  context.subscriptions.push({ dispose: () => clearInterval(quotaTimer) });
+  // The activation reading: a fresh live look at usage once, on startup.
+  updateQuotaStatus(quotaItem, { live: true });
+  armQuotaTimer();
+  context.subscriptions.push({ dispose: () => { if (quotaTimer) clearInterval(quotaTimer); } });
 
   } catch (err: any) {
     OUTPUT.error(`Activation failed: ${err?.message ?? err}`);

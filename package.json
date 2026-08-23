@@ -202,13 +202,15 @@
           },
           "uniqueItems": true,
           "maxItems": 2,
+          "order": 10,
           "description": "Providers to show in the status bar (at most two). Hover to see usage and estimated API cost for every provider."
         },
         "claudeHistory.quota.claudeUsagePollSeconds": {
           "type": "number",
           "default": 300,
           "minimum": 0,
-          "markdownDescription": "How often the live Claude usage endpoint (`/api/oauth/usage`) may be polled, in seconds. `0` turns live polling off: the status bar and the Usage Analytics panel then show local token estimates instead of server-side limits. Any value above `0` is raised to at least `300`, because this endpoint's rate budget is shared with every other Claude client signed in to the same account."
+          "order": 11,
+          "markdownDescription": "How often the live Claude usage endpoint (`/api/oauth/usage`) may be polled, in seconds. `0` turns live polling off: the status bar and the Usage Analytics panel then show local token estimates instead of server-side limits. Any value above `0` is raised to at least `300`, because this endpoint's rate budget is shared with every other Claude client signed in to the same account. The status bar skips the request entirely whenever `\"claude\"` is not in #claudeHistory.quota.statusBarProviders#, and the Usage Analytics panel still fetches while polling is on, since the quota cards are what it exists to show."
         },
         "claudeHistory.inheritTheme": {
           "type": "boolean",
