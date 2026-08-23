@@ -86,6 +86,7 @@ You can support this project by giving a star on GitHub ⭐️ or by becoming an
 | `claudeHistory.enableSearchIndexing` | `true` | Build and maintain the full-text search index. |
 | `claudeHistory.maxIndexedFileSizeMB` | `50` | Skip indexing session files larger than this. |
 | `claudeHistory.autoRefreshInterval` | `0` | Fallback polling interval (seconds). `0` = off. The file watcher handles live detection. |
+| `claudeHistory.quota.claudeUsagePollSeconds` | `300` | How often the live Claude usage endpoint may be polled (seconds). Values above `0` are raised to at least `300`. `0` = off, showing the cached reading or the local token estimate instead. |
 | `claudeHistory.inheritTheme` | `true` | Conversation viewer follows the VS Code color theme. |
 | `claudeHistory.defaultSort` | `"newest"` | Default sort order: newest, oldest, messages, activity. |
 | `claudeHistory.defaultDisplayMode` | `"expanded"` | Default display density: expanded or compact. |

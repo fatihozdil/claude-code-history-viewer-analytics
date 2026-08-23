@@ -19,7 +19,7 @@ import { ConversationPanel } from "./webview/conversationPanel.js";
 import { AnalyticsPanel } from "./webview/analyticsPanel.js";
 import { BackupContentProvider } from "./diff/backupContentProvider.js";
 import type { SessionMeta } from "./claude/types.js";
-import { resolveQuota } from "./services/quota.js";
+import { resolveQuota, resolveUsagePollMs } from "./services/quota.js";
 import { deepseekUsageSummary } from "./services/analytics.js";
 import { readAgyUsage } from "./agy/usage.js";
 import { readCodexUsage } from "./codex/usage.js";
@@ -417,8 +417,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // ---- Config change listener ----
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("claudeHistory.quota.statusBarProviders")) {
-        updateQuotaStatus(quotaItem);
+      if (
+        e.affectsConfiguration("claudeHistory.quota.statusBarProviders") ||
+        e.affectsConfiguration("claudeHistory.quota.claudeUsagePollSeconds")
+      ) {
+        // The user just changed the quota setting, so a fresh reading is
+        // what they asked for.
+        updateQuotaStatus(quotaItem, { live: true });
+        armQuotaTimer();
       }
       if (e.affectsConfiguration("claudeHistory.autoRefreshInterval")) {
         const newInterval = vscode.workspace
@@ -447,15 +453,42 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   quotaItem.show();
   context.subscriptions.push(quotaItem);
   let quotaUpdateGeneration = 0;
+  let quotaTimer: ReturnType<typeof setInterval> | null = null;
 
-  async function updateQuotaStatus(item: vscode.StatusBarItem): Promise<void> {
+  // Re-arms the live quota poll on the interval from
+  // claudeHistory.quota.claudeUsagePollSeconds, clearing whatever timer is
+  // currently running first. Called once at activation and again whenever
+  // the setting changes, so a new interval (or turning polling off) takes
+  // effect without a window reload.
+  function armQuotaTimer(): void {
+    if (quotaTimer) clearInterval(quotaTimer);
+    quotaTimer = null;
+    const pollMs = resolveUsagePollMs(
+      vscode.workspace.getConfiguration("claudeHistory.quota").get("claudeUsagePollSeconds", 300),
+    );
+    if (pollMs === null) return;
+    quotaTimer = setInterval(() => updateQuotaStatus(quotaItem, { live: true }), pollMs);
+  }
+
+  async function updateQuotaStatus(item: vscode.StatusBarItem, opts?: { live?: boolean }): Promise<void> {
     const generation = ++quotaUpdateGeneration;
     try {
-      const quota = await resolveQuota();
-      const configuredProviders = vscode.workspace.getConfiguration("claudeHistory.quota").get<unknown[]>("statusBarProviders", ["claude", "codex"]);
+      const quotaConfig = vscode.workspace.getConfiguration("claudeHistory.quota");
+      const configuredProviders = quotaConfig.get<unknown[]>("statusBarProviders", ["claude", "codex"]);
       const providers = (Array.isArray(configuredProviders) ? configuredProviders : ["claude", "codex"])
         .filter((provider): provider is string => typeof provider === "string" && ["claude", "gemini", "codex", "deepseek", "agy"].includes(provider))
         .slice(0, 2);
+      // The Claude entry is the only thing here that needs a live server
+      // reading. When it is not on the status bar, or the user turned polling
+      // off, resolve from cache/estimate instead of spending a request. Most
+      // callers are session-list repaints (refresh, pin, sort, the watcher…)
+      // that have nothing to do with the usage endpoint, so they leave
+      // opts.live unset and this always resolves to false for them.
+      const pollMs = resolveUsagePollMs(quotaConfig.get("claudeUsagePollSeconds", 300));
+      const quota = await resolveQuota({
+        ...(pollMs !== null ? { softTtlMs: pollMs } : {}),
+        allowLive: opts?.live === true && pollMs !== null && providers.includes("claude"),
+      });
       const agyUsage = providers.includes("agy") ? await readAgyUsage(agyDir) : null;
       const codexUsage = providers.includes("codex") ? await readCodexUsage(codexDir) : null;
       // The full analytics aggregation is a multi-second synchronous sql.js
@@ -483,8 +516,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return null;
       }).filter((entry): entry is string => entry !== null);
       item.text = `$(pulse) ${entries.join(" · ") || "—"}`;
+      // A missing live reading has two very different causes now: the user is
+      // not signed in, or the user (or the provider list) turned live polling
+      // off. Say which one, otherwise the tooltip blames a sign-in problem for
+      // a setting the user chose.
+      const liveSuppressed = pollMs === null || !providers.includes("claude");
       const detail = quota.source !== "live"
-        ? "Claude quota unavailable · local API-cost estimates only"
+        ? liveSuppressed
+          ? "Claude live polling off · local API-cost estimates only"
+          : "Claude quota unavailable · local API-cost estimates only"
         : quota.cachedAtMs !== undefined
           ? `live · cached ${fmtAge(Date.now() - quota.cachedAtMs)} ago`
           : "live · from claude.ai";
@@ -496,7 +536,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         ...(quota.source === "live" ? [
           `Claude 5h quota: ${quota.fiveHour.remainingPct}% remaining · resets in ${fmtDuration(quota.fiveHour.resetsIn)}`,
           `Claude 7d quota: ${quota.weekly.remainingPct}% remaining · resets in ${fmtDuration(quota.weekly.resetsIn)}`,
-        ] : ["Claude quota: unavailable (sign in to Claude Code for live limits)"]),
+        ] : [liveSuppressed
+          ? "Claude quota: live polling is off (claudeHistory.quota.claudeUsagePollSeconds)"
+          : "Claude quota: unavailable (sign in to Claude Code for live limits)"]),
       ].join("\n");
     } catch {
       if (generation !== quotaUpdateGeneration) return;
@@ -566,10 +608,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return "<1m";
   }
 
-  updateQuotaStatus(quotaItem);
-
-  const quotaTimer = setInterval(() => updateQuotaStatus(quotaItem), 5 * 60 * 1000);
-  context.subscriptions.push({ dispose: () => clearInterval(quotaTimer) });
+  // The activation reading: a fresh live look at usage once, on startup.
+  updateQuotaStatus(quotaItem, { live: true });
+  armQuotaTimer();
+  context.subscriptions.push({ dispose: () => { if (quotaTimer) clearInterval(quotaTimer); } });
 
   } catch (err: any) {
     OUTPUT.error(`Activation failed: ${err?.message ?? err}`);

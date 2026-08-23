@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -11,11 +11,64 @@ import {
   resolveQuota,
   readLiveUsageCache,
   writeLiveUsageCache,
+  resolveUsagePollMs,
+  MIN_USAGE_POLL_SECONDS,
+  MAX_USAGE_POLL_SECONDS,
+  parseRetryAfterMs,
+  noteRateLimited,
+  isRateLimited,
+  clearRateLimit,
+  fetchLiveUsage,
 } from "../src/services/quota.js";
 
 /** A throwaway cache path so tests never touch the real ~/.claude file. */
 function tmpCachePath(): string {
   return join(tmpdir(), `cc-usage-cache-test-${Math.random().toString(36).slice(2)}.json`);
+}
+
+/**
+ * Run `fn` with the OAuth credentials store pointed at a throwaway home directory, so a test that needs `fetchLiveUsage` to get past its token check does not depend on whether the machine running the suite happens to be logged in. `readOAuthAccessToken` resolves the path through `os.homedir()` on every call, which reads USERPROFILE on Windows and HOME elsewhere.
+ */
+async function withFakeHome<T>(token: string | null, fn: () => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "cc-usage-home-"));
+  mkdirSync(join(dir, ".claude"));
+  if (token !== null) {
+    writeFileSync(
+      join(dir, ".claude", ".credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: token } }),
+    );
+  }
+  const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Run `fn` with `globalThis.fetch` replaced by a counting stub that always fails, inside `withFakeHome` so the OAuth token check passes. Needed because the cache fast path, the step-2 cache fallback and a failed fetch all return the same reading: whether a live request was even attempted is the only observable difference, so a test that wants to prove a gate held has to count attempts.
+ */
+async function withCountedFetch(fn: (attempts: () => number) => Promise<void>): Promise<void> {
+  const realFetch = globalThis.fetch;
+  let attempts = 0;
+  try {
+    await withFakeHome("test-token", async () => {
+      globalThis.fetch = (async () => {
+        attempts += 1;
+        throw new Error("no network in tests");
+      }) as unknown as typeof globalThis.fetch;
+      await fn(() => attempts);
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +452,7 @@ test("resolveQuota ignores a cached snapshot whose window has already reset", as
 test("resolveQuota fast-path serves a very fresh cache without a network call", async () => {
   const now = new Date("2026-06-19T14:32:00.000Z");
   // liveUsage is omitted, so without the fast-path this would invoke the real
-  // fetchLiveUsage() (a network call). The fresh cache (10s old, < 90s TTL)
+  // fetchLiveUsage() (a network call). The fresh cache (10s old, < 300s default TTL)
   // must short-circuit and return immediately.
   const result = await resolveQuota({
     now,
@@ -456,4 +509,300 @@ test("writeLiveUsageCache + readLiveUsageCache round-trip", () => {
   // sanity: it really wrote JSON
   assert.doesNotThrow(() => JSON.parse(readFileSync(path, "utf8")));
   rmSync(path, { force: true });
+});
+
+// ---------------------------------------------------------------------------
+// resolveUsagePollMs
+// ---------------------------------------------------------------------------
+
+test("resolveUsagePollMs disables polling for 0 and for negative values", () => {
+  assert.equal(resolveUsagePollMs(0), null);
+  assert.equal(resolveUsagePollMs(-30), null);
+});
+
+test("resolveUsagePollMs clamps a too-small interval up to the floor", () => {
+  assert.equal(resolveUsagePollMs(90), MIN_USAGE_POLL_SECONDS * 1000);
+  assert.equal(resolveUsagePollMs(299), MIN_USAGE_POLL_SECONDS * 1000);
+});
+
+test("resolveUsagePollMs honours an interval at or above the floor", () => {
+  assert.equal(resolveUsagePollMs(300), 300_000);
+  assert.equal(resolveUsagePollMs(900), 900_000);
+});
+
+test("resolveUsagePollMs caps an interval that setInterval could not represent", () => {
+  // setInterval degrades any delay above 2^31-1 ms to 1 ms, so an uncapped
+  // "once a month" value would busy-loop against the endpoint the floor
+  // protects. Every oversized input has to land on the ceiling instead.
+  assert.equal(resolveUsagePollMs(MAX_USAGE_POLL_SECONDS), MAX_USAGE_POLL_SECONDS * 1000);
+  assert.equal(resolveUsagePollMs(2_592_000), MAX_USAGE_POLL_SECONDS * 1000);
+  assert.equal(resolveUsagePollMs(Number.MAX_SAFE_INTEGER), MAX_USAGE_POLL_SECONDS * 1000);
+  assert.ok(resolveUsagePollMs(2_592_000)! <= 2_147_483_647);
+});
+
+test("resolveUsagePollMs falls back to the default for non-numeric input", () => {
+  assert.equal(resolveUsagePollMs(undefined), 300_000);
+  assert.equal(resolveUsagePollMs("600"), 300_000);
+  assert.equal(resolveUsagePollMs(Number.NaN), 300_000);
+});
+
+test("resolveQuota default TTL serves a 100s-old cache without a network call", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  // liveUsage is omitted, so a fetch would be a real network call. Under the
+  // old 90s TTL this cache was stale; under the 300s default it is served.
+  const result = await resolveQuota({
+    now,
+    claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+    queryDb: () => ({ total: 0 }),
+    liveCache: {
+      capturedAtMs: now.getTime() - 100_000,
+      five_hour: { utilization: 50, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
+      seven_day: { utilization: 10, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
+    },
+  });
+
+  assert.equal(result.source, "live");
+  assert.equal(result.cachedAtMs, now.getTime() - 100_000);
+});
+
+test("resolveQuota honours a caller-supplied softTtlMs", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  const cache = {
+    capturedAtMs: now.getTime() - 400_000, // 400s old
+    five_hour: { utilization: 50, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
+    seven_day: { utilization: 10, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
+  };
+
+  // Both the fast path and the cache fallback return the same reading, so the only observable difference is whether a live fetch was attempted. Count the attempts.
+  const realFetch = globalThis.fetch;
+  let fetchAttempts = 0;
+  const run = (softTtlMs: number) =>
+    resolveQuota({
+      now,
+      claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+      queryDb: () => ({ total: 0 }),
+      liveCache: cache,
+      cachePath: tmpCachePath(),
+      softTtlMs,
+    });
+
+  try {
+    await withFakeHome("test-token", async () => {
+      globalThis.fetch = (async () => {
+        fetchAttempts += 1;
+        throw new Error("no network in tests");
+      }) as unknown as typeof globalThis.fetch;
+
+      // 900s TTL: the 400s-old cache is still inside the window, so the fast path serves it and nothing touches the network.
+      const wide = await run(900_000);
+      assert.equal(fetchAttempts, 0);
+      assert.equal(wide.source, "live");
+      assert.equal(wide.cachedAtMs, now.getTime() - 400_000);
+
+      // 300s TTL: the same cache is now outside the window, so a live fetch is attempted. It fails, and the still-usable cache is served as the fallback.
+      const narrow = await run(300_000);
+      assert.equal(fetchAttempts, 1);
+      assert.equal(narrow.source, "live");
+      assert.equal(narrow.cachedAtMs, now.getTime() - 400_000);
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// resolveQuota allowLive
+// ---------------------------------------------------------------------------
+
+test("resolveQuota with allowLive:false serves the cache and never fetches", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  // No liveUsage injected and the cache is older than any TTL, so a fetch would
+  // be attempted; allowLive:false must suppress it and fall back to the cache.
+  await withCountedFetch(async (attempts) => {
+    const result = await resolveQuota({
+      now,
+      claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+      queryDb: () => ({ total: 0 }),
+      allowLive: false,
+      cachePath: tmpCachePath(),
+      liveCache: {
+        capturedAtMs: now.getTime() - 30 * 60_000,
+        five_hour: { utilization: 42, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
+        seven_day: { utilization: 12, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
+      },
+    });
+
+    assert.equal(attempts(), 0);
+    assert.equal(result.source, "live");
+    assert.equal(result.cachedAtMs, now.getTime() - 30 * 60_000);
+    assert.equal(result.fiveHour.pct, 42);
+  });
+});
+
+test("resolveQuota with allowLive:false and no cache returns the estimate", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  const result = await resolveQuota({
+    now,
+    claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+    queryDb: () => ({ total: 0 }),
+    allowLive: false,
+    liveCache: null,
+  });
+
+  assert.equal(result.source, "estimate");
+});
+
+test("resolveQuota with allowLive:false ignores force", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  await withCountedFetch(async (attempts) => {
+    const result = await resolveQuota({
+      now,
+      claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+      queryDb: () => ({ total: 0 }),
+      allowLive: false,
+      force: true,
+      cachePath: tmpCachePath(),
+      liveCache: {
+        capturedAtMs: now.getTime() - 30 * 60_000,
+        five_hour: { utilization: 42, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
+        seven_day: { utilization: 12, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
+      },
+    });
+
+    assert.equal(attempts(), 0);
+    assert.equal(result.source, "live");
+    assert.equal(result.cachedAtMs, now.getTime() - 30 * 60_000);
+  });
+});
+
+test("resolveQuota with allowLive:false never calls fetch, even when the cache cannot satisfy the request", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  // No cache at all: the cache fast path and the step-2 fallback both fall
+  // through, so only allowLive:false stands between this call and a real
+  // network fetch. Count attempts directly to prove the gate held, since the
+  // returned object alone (source: "estimate") would look identical whether
+  // the gate worked or a failed fetch produced the same fallback.
+  await withCountedFetch(async (attempts) => {
+    const result = await resolveQuota({
+      now,
+      claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+      queryDb: () => ({ total: 0 }),
+      allowLive: false,
+      liveCache: null,
+      cachePath: tmpCachePath(),
+    });
+
+    assert.equal(attempts(), 0);
+    assert.equal(result.source, "estimate");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 429 back-off
+// ---------------------------------------------------------------------------
+
+test("parseRetryAfterMs floors a missing or zero Retry-After at five minutes", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  assert.equal(parseRetryAfterMs(null, now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("0", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("30", now), 5 * 60_000);
+});
+
+test("parseRetryAfterMs honours a Retry-After longer than the floor", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  assert.equal(parseRetryAfterMs("900", now), 900_000);
+  assert.equal(parseRetryAfterMs(new Date(now + 20 * 60_000).toUTCString(), now), 20 * 60_000);
+});
+
+test("parseRetryAfterMs falls back to the floor for unparsable input", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  assert.equal(parseRetryAfterMs("soon", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("30x", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("Infinity", now), 5 * 60_000);
+});
+
+test("parseRetryAfterMs floors every hostile Retry-After the server can send", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  // The header is attacker-influenced, so no input may produce a window shorter than the floor, and none may produce NaN.
+  assert.equal(parseRetryAfterMs("", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("   ", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("-100", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs(new Date(now - 86400_000).toUTCString(), now), 5 * 60_000);
+});
+
+test("parseRetryAfterMs caps an absurd Retry-After at 24 hours", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  assert.equal(parseRetryAfterMs("99999999999", now), 24 * 3600_000);
+  assert.equal(parseRetryAfterMs(new Date(now + 400 * 86400_000).toUTCString(), now), 24 * 3600_000);
+  assert.equal(parseRetryAfterMs("1e400", now), 5 * 60_000); // Infinity is not finite
+});
+
+test("noteRateLimited suppresses fetches until the window passes", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  clearRateLimit();
+  try {
+    assert.equal(isRateLimited(now), false);
+    noteRateLimited("0", now);
+    assert.equal(isRateLimited(now + 60_000), true);
+    assert.equal(isRateLimited(now + 5 * 60_000), false);
+  } finally {
+    clearRateLimit();
+  }
+});
+
+test("fetchLiveUsage records the back-off window on a 429 and clears it on success", async () => {
+  const realFetch = globalThis.fetch;
+  clearRateLimit();
+  try {
+    globalThis.fetch = (async () => ({
+      ok: false,
+      status: 429,
+      headers: { get: (name: string) => (name.toLowerCase() === "retry-after" ? "0" : null) },
+    })) as unknown as typeof globalThis.fetch;
+    assert.equal(await fetchLiveUsage("test-token"), null);
+    assert.equal(isRateLimited(Date.now() + 60_000), true);
+
+    globalThis.fetch = (async () => ({
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({
+        five_hour: { utilization: 10, resets_at: new Date(Date.now() + 3600_000).toISOString() },
+        seven_day: { utilization: 5, resets_at: new Date(Date.now() + 86400_000).toISOString() },
+      }),
+    })) as unknown as typeof globalThis.fetch;
+    const ok = await fetchLiveUsage("test-token");
+    assert.equal(ok?.five_hour?.utilization, 10);
+    assert.equal(isRateLimited(Date.now() + 60_000), false);
+  } finally {
+    globalThis.fetch = realFetch;
+    clearRateLimit();
+  }
+});
+
+test("resolveQuota does not fetch while rate-limited", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  clearRateLimit();
+  noteRateLimited("0", Date.now());
+  try {
+    // No cache to fall back through and force:true, so only the rate-limit
+    // gate stands between this call and a real network fetch. withCountedFetch
+    // counts attempts directly: the returned object alone (source: "estimate")
+    // would look identical whether the gate held or a failed fetch produced
+    // the same fallback, so the count is what actually proves the gate held.
+    await withCountedFetch(async (attempts) => {
+      const result = await resolveQuota({
+        now,
+        claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+        queryDb: () => ({ total: 0 }),
+        liveCache: null,
+        cachePath: tmpCachePath(),
+        force: true,
+      });
+      assert.equal(attempts(), 0);
+      assert.equal(result.source, "estimate");
+    });
+  } finally {
+    clearRateLimit();
+  }
 });

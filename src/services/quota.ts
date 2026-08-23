@@ -372,6 +372,53 @@ export function readOAuthAccessToken(): string | null {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Rate-limit back-off
+//
+// The endpoint answers 429 with `Retry-After: 0` once the account's sliding
+// hour window is full, which is an invitation to retry immediately and the
+// exact reason a fast poller keeps every other client starved. We treat any
+// 429 as a saturated window and stay off the endpoint for at least five
+// minutes, honouring a longer Retry-After when the server sends one.
+// ---------------------------------------------------------------------------
+
+const RATE_LIMIT_MIN_BACKOFF_MS = 5 * 60 * 1000;
+// A ceiling as well as a floor: a single absurd Retry-After, from a bug or a
+// tampered response, must not disable live usage for the rest of the session.
+const RATE_LIMIT_MAX_BACKOFF_MS = 24 * 60 * 60 * 1000;
+let rateLimitedUntilMs = 0;
+
+/** Milliseconds to wait after a 429, clamped between five minutes and a day. */
+export function parseRetryAfterMs(header: string | null, nowMs: number): number {
+  const clamp = (ms: number): number =>
+    Math.min(Math.max(ms, RATE_LIMIT_MIN_BACKOFF_MS), RATE_LIMIT_MAX_BACKOFF_MS);
+  if (!header) return RATE_LIMIT_MIN_BACKOFF_MS;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds)) {
+    return clamp(seconds * 1000);
+  }
+  const at = Date.parse(header);
+  if (!Number.isNaN(at)) {
+    return clamp(at - nowMs);
+  }
+  return RATE_LIMIT_MIN_BACKOFF_MS;
+}
+
+/** Record that the endpoint refused us, and for how long to stay away. */
+export function noteRateLimited(header: string | null, nowMs: number): void {
+  rateLimitedUntilMs = nowMs + parseRetryAfterMs(header, nowMs);
+}
+
+/** True while the back-off window from the last 429 is still open. */
+export function isRateLimited(nowMs: number): boolean {
+  return nowMs < rateLimitedUntilMs;
+}
+
+/** Drop the back-off window. Called on a successful fetch, and by tests. */
+export function clearRateLimit(): void {
+  rateLimitedUntilMs = 0;
+}
+
 /**
  * Fetch the live usage payload. Returns null when there is no token, the
  * request fails, or it times out — callers should fall back to the estimate.
@@ -393,7 +440,13 @@ export async function fetchLiveUsage(
       signal: controller.signal,
     });
     clearTimeout(timer);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (res.status === 429) {
+        noteRateLimited(res.headers.get("retry-after"), Date.now());
+      }
+      return null;
+    }
+    clearRateLimit();
     return (await res.json()) as RawUsageResponse;
   } catch {
     return null;
@@ -455,9 +508,38 @@ export function writeLiveUsageCache(cache: LiveUsageCache, path?: string): void 
 const CACHE_MAX_AGE_MS = 6 * 60 * 60 * 1000; // 6h
 
 // Within this window of a successful capture, serve the cache without a network
-// call. Long enough to absorb bursts (status-bar poll + panel opens), short
-// enough that an explicit, spaced-out refresh still re-fetches.
-const CACHE_SOFT_TTL_MS = 90 * 1000; // 90s
+// call. This value, not any timer, is what decides how often we actually hit
+// the endpoint: the status bar refreshes on every file-watcher event and on
+// most user commands, so anything shorter turns into a poll at that rate.
+//
+// The endpoint enforces its rate budget per account and shares it with every
+// other Claude client signed in as the same user, so a short interval starves
+// those clients out. 300s is the floor we allow; users running other usage
+// tools can raise it further.
+export const MIN_USAGE_POLL_SECONDS = 300;
+// The resolved value is handed to setInterval, which silently degrades any
+// delay above 2^31-1 ms to 1 ms. Someone writing 2592000 for "once a month"
+// would turn the poll into a busy loop against the very endpoint the floor
+// above exists to protect, so cap the interval at a day.
+export const MAX_USAGE_POLL_SECONDS = 24 * 60 * 60;
+export const DEFAULT_USAGE_POLL_SECONDS = 300;
+const CACHE_SOFT_TTL_MS = DEFAULT_USAGE_POLL_SECONDS * 1000;
+
+/**
+ * Turn the configured `claudeHistory.quota.claudeUsagePollSeconds` value into a
+ * usable interval. Returns null when the user disabled live polling, and a
+ * millisecond value clamped into `[MIN_USAGE_POLL_SECONDS,
+ * MAX_USAGE_POLL_SECONDS]` otherwise. Anything that is not a finite number
+ * falls back to the default.
+ */
+export function resolveUsagePollMs(configured: unknown): number | null {
+  const seconds =
+    typeof configured === "number" && Number.isFinite(configured)
+      ? configured
+      : DEFAULT_USAGE_POLL_SECONDS;
+  if (seconds <= 0) return null;
+  return Math.min(Math.max(seconds, MIN_USAGE_POLL_SECONDS), MAX_USAGE_POLL_SECONDS) * 1000;
+}
 
 function cacheIsUsable(now: Date, cache: LiveUsageCache): boolean {
   if (now.getTime() - cache.capturedAtMs > CACHE_MAX_AGE_MS) return false;
@@ -502,6 +584,19 @@ export async function resolveQuota(opts?: {
   cachePath?: string;
   /** Skip the short-TTL cache fast-path and force a fresh network fetch. */
   force?: boolean;
+  /**
+   * How long a captured snapshot is served without a network call, in
+   * milliseconds. Defaults to `CACHE_SOFT_TTL_MS`. Callers pass the user's
+   * configured poll interval here; see `resolveUsagePollMs`.
+   */
+  softTtlMs?: number;
+  /**
+   * Whether a network call to the usage endpoint is allowed at all. Pass false
+   * when nothing on screen shows the Claude quota, or when the user turned
+   * live polling off: the call then resolves from the cache and finally from
+   * the local estimate, exactly as a failed fetch does.
+   */
+  allowLive?: boolean;
 }): Promise<QuotaView> {
   const now = opts?.now ?? new Date();
   const estimate = computeQuota(opts);
@@ -538,14 +633,19 @@ export async function resolveQuota(opts?: {
     opts?.liveUsage === undefined &&
     cache &&
     cacheIsUsable(now, cache) &&
-    now.getTime() - cache.capturedAtMs < CACHE_SOFT_TTL_MS
+    now.getTime() - cache.capturedAtMs < (opts?.softTtlMs ?? CACHE_SOFT_TTL_MS)
   ) {
     const fast = buildLive(cache, cache.capturedAtMs);
     if (fast) return fast;
   }
 
-  // 1. Try a fresh fetch. On success, persist it and serve it.
-  const raw = opts?.liveUsage !== undefined ? opts.liveUsage : await fetchLiveUsage();
+  // 1. Try a fresh fetch. On success, persist it and serve it. A caller that
+  //    displays nothing live passes allowLive:false and skips straight to the
+  //    cache and the estimate below, so a hidden panel never spends a request
+  //    from the shared per-account rate budget.
+  const allowLive = (opts?.allowLive ?? true) && !isRateLimited(now.getTime());
+  const raw =
+    opts?.liveUsage !== undefined ? opts.liveUsage : allowLive ? await fetchLiveUsage() : null;
   if (raw) {
     const fresh = buildLive(raw);
     if (fresh) {
