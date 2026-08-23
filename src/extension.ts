@@ -494,8 +494,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return null;
       }).filter((entry): entry is string => entry !== null);
       item.text = `$(pulse) ${entries.join(" · ") || "—"}`;
+      // A missing live reading has two very different causes now: the user is
+      // not signed in, or the user (or the provider list) turned live polling
+      // off. Say which one, otherwise the tooltip blames a sign-in problem for
+      // a setting the user chose.
+      const liveSuppressed = pollMs === null || !providers.includes("claude");
       const detail = quota.source !== "live"
-        ? "Claude quota unavailable · local API-cost estimates only"
+        ? liveSuppressed
+          ? "Claude live polling off · local API-cost estimates only"
+          : "Claude quota unavailable · local API-cost estimates only"
         : quota.cachedAtMs !== undefined
           ? `live · cached ${fmtAge(Date.now() - quota.cachedAtMs)} ago`
           : "live · from claude.ai";
@@ -507,7 +514,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         ...(quota.source === "live" ? [
           `Claude 5h quota: ${quota.fiveHour.remainingPct}% remaining · resets in ${fmtDuration(quota.fiveHour.resetsIn)}`,
           `Claude 7d quota: ${quota.weekly.remainingPct}% remaining · resets in ${fmtDuration(quota.weekly.resetsIn)}`,
-        ] : ["Claude quota: unavailable (sign in to Claude Code for live limits)"]),
+        ] : [liveSuppressed
+          ? "Claude quota: live polling is off (claudeHistory.quota.claudeUsagePollSeconds)"
+          : "Claude quota: unavailable (sign in to Claude Code for live limits)"]),
       ].join("\n");
     } catch {
       if (generation !== quotaUpdateGeneration) return;

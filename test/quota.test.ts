@@ -46,6 +46,25 @@ async function withFakeHome<T>(token: string | null, fn: () => Promise<T>): Prom
   }
 }
 
+/**
+ * Run `fn` with `globalThis.fetch` replaced by a counting stub that always fails, inside `withFakeHome` so the OAuth token check passes. Needed because the cache fast path, the step-2 cache fallback and a failed fetch all return the same reading: whether a live request was even attempted is the only observable difference, so a test that wants to prove a gate held has to count attempts.
+ */
+async function withCountedFetch(fn: (attempts: () => number) => Promise<void>): Promise<void> {
+  const realFetch = globalThis.fetch;
+  let attempts = 0;
+  try {
+    await withFakeHome("test-token", async () => {
+      globalThis.fetch = (async () => {
+        attempts += 1;
+        throw new Error("no network in tests");
+      }) as unknown as typeof globalThis.fetch;
+      await fn(() => attempts);
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // readPlanTier
 // ---------------------------------------------------------------------------
@@ -583,21 +602,25 @@ test("resolveQuota with allowLive:false serves the cache and never fetches", asy
   const now = new Date("2026-06-19T14:32:00.000Z");
   // No liveUsage injected and the cache is older than any TTL, so a fetch would
   // be attempted; allowLive:false must suppress it and fall back to the cache.
-  const result = await resolveQuota({
-    now,
-    claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
-    queryDb: () => ({ total: 0 }),
-    allowLive: false,
-    liveCache: {
-      capturedAtMs: now.getTime() - 30 * 60_000,
-      five_hour: { utilization: 42, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
-      seven_day: { utilization: 12, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
-    },
-  });
+  await withCountedFetch(async (attempts) => {
+    const result = await resolveQuota({
+      now,
+      claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+      queryDb: () => ({ total: 0 }),
+      allowLive: false,
+      cachePath: tmpCachePath(),
+      liveCache: {
+        capturedAtMs: now.getTime() - 30 * 60_000,
+        five_hour: { utilization: 42, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
+        seven_day: { utilization: 12, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
+      },
+    });
 
-  assert.equal(result.source, "live");
-  assert.equal(result.cachedAtMs, now.getTime() - 30 * 60_000);
-  assert.equal(result.fiveHour.pct, 42);
+    assert.equal(attempts(), 0);
+    assert.equal(result.source, "live");
+    assert.equal(result.cachedAtMs, now.getTime() - 30 * 60_000);
+    assert.equal(result.fiveHour.pct, 42);
+  });
 });
 
 test("resolveQuota with allowLive:false and no cache returns the estimate", async () => {
@@ -615,21 +638,25 @@ test("resolveQuota with allowLive:false and no cache returns the estimate", asyn
 
 test("resolveQuota with allowLive:false ignores force", async () => {
   const now = new Date("2026-06-19T14:32:00.000Z");
-  const result = await resolveQuota({
-    now,
-    claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
-    queryDb: () => ({ total: 0 }),
-    allowLive: false,
-    force: true,
-    liveCache: {
-      capturedAtMs: now.getTime() - 30 * 60_000,
-      five_hour: { utilization: 42, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
-      seven_day: { utilization: 12, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
-    },
-  });
+  await withCountedFetch(async (attempts) => {
+    const result = await resolveQuota({
+      now,
+      claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+      queryDb: () => ({ total: 0 }),
+      allowLive: false,
+      force: true,
+      cachePath: tmpCachePath(),
+      liveCache: {
+        capturedAtMs: now.getTime() - 30 * 60_000,
+        five_hour: { utilization: 42, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
+        seven_day: { utilization: 12, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
+      },
+    });
 
-  assert.equal(result.source, "live");
-  assert.equal(result.cachedAtMs, now.getTime() - 30 * 60_000);
+    assert.equal(attempts(), 0);
+    assert.equal(result.source, "live");
+    assert.equal(result.cachedAtMs, now.getTime() - 30 * 60_000);
+  });
 });
 
 test("resolveQuota with allowLive:false never calls fetch, even when the cache cannot satisfy the request", async () => {
@@ -639,28 +666,17 @@ test("resolveQuota with allowLive:false never calls fetch, even when the cache c
   // network fetch. Count attempts directly to prove the gate held, since the
   // returned object alone (source: "estimate") would look identical whether
   // the gate worked or a failed fetch produced the same fallback.
-  const realFetch = globalThis.fetch;
-  let fetchAttempts = 0;
-  try {
-    await withFakeHome("test-token", async () => {
-      globalThis.fetch = (async () => {
-        fetchAttempts += 1;
-        throw new Error("no network in tests");
-      }) as unknown as typeof globalThis.fetch;
-
-      const result = await resolveQuota({
-        now,
-        claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
-        queryDb: () => ({ total: 0 }),
-        allowLive: false,
-        liveCache: null,
-        cachePath: tmpCachePath(),
-      });
-
-      assert.equal(fetchAttempts, 0);
-      assert.equal(result.source, "estimate");
+  await withCountedFetch(async (attempts) => {
+    const result = await resolveQuota({
+      now,
+      claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+      queryDb: () => ({ total: 0 }),
+      allowLive: false,
+      liveCache: null,
+      cachePath: tmpCachePath(),
     });
-  } finally {
-    globalThis.fetch = realFetch;
-  }
+
+    assert.equal(attempts(), 0);
+    assert.equal(result.source, "estimate");
+  });
 });
