@@ -706,6 +706,17 @@ test("parseRetryAfterMs honours a Retry-After longer than the floor", () => {
 test("parseRetryAfterMs falls back to the floor for unparsable input", () => {
   const now = Date.parse("2026-06-19T14:32:00.000Z");
   assert.equal(parseRetryAfterMs("soon", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("30x", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("Infinity", now), 5 * 60_000);
+});
+
+test("parseRetryAfterMs floors every hostile Retry-After the server can send", () => {
+  const now = Date.parse("2026-06-19T14:32:00.000Z");
+  // The header is attacker-influenced, so no input may produce a window shorter than the floor, and none may produce NaN.
+  assert.equal(parseRetryAfterMs("", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("   ", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs("-100", now), 5 * 60_000);
+  assert.equal(parseRetryAfterMs(new Date(now - 86400_000).toUTCString(), now), 5 * 60_000);
 });
 
 test("parseRetryAfterMs caps an absurd Retry-After at 24 hours", () => {
