@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -18,6 +18,32 @@ import {
 /** A throwaway cache path so tests never touch the real ~/.claude file. */
 function tmpCachePath(): string {
   return join(tmpdir(), `cc-usage-cache-test-${Math.random().toString(36).slice(2)}.json`);
+}
+
+/**
+ * Run `fn` with the OAuth credentials store pointed at a throwaway home directory, so a test that needs `fetchLiveUsage` to get past its token check does not depend on whether the machine running the suite happens to be logged in. `readOAuthAccessToken` resolves the path through `os.homedir()` on every call, which reads USERPROFILE on Windows and HOME elsewhere.
+ */
+async function withFakeHome<T>(token: string | null, fn: () => Promise<T>): Promise<T> {
+  const dir = mkdtempSync(join(tmpdir(), "cc-usage-home-"));
+  mkdirSync(join(dir, ".claude"));
+  if (token !== null) {
+    writeFileSync(
+      join(dir, ".claude", ".credentials.json"),
+      JSON.stringify({ claudeAiOauth: { accessToken: token } }),
+    );
+  }
+  const previous = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  try {
+    return await fn();
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -512,32 +538,39 @@ test("resolveQuota honours a caller-supplied softTtlMs", async () => {
     seven_day: { utilization: 10, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
   };
 
-  // 900s TTL: the 400s-old cache is still inside the window, so no fetch.
-  const wide = await resolveQuota({
-    now,
-    claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
-    queryDb: () => ({ total: 0 }),
-    liveCache: cache,
-    softTtlMs: 900_000,
-  });
-  assert.equal(wide.source, "live");
-  assert.equal(wide.cachedAtMs, now.getTime() - 400_000);
+  // Both the fast path and the cache fallback return the same reading, so the only observable difference is whether a live fetch was attempted. Count the attempts.
+  const realFetch = globalThis.fetch;
+  let fetchAttempts = 0;
+  const run = (softTtlMs: number) =>
+    resolveQuota({
+      now,
+      claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+      queryDb: () => ({ total: 0 }),
+      liveCache: cache,
+      cachePath: tmpCachePath(),
+      softTtlMs,
+    });
 
-  // 300s TTL: the same cache is outside the fast path. liveUsage is injected
-  // so no real network call happens, and the fresh value is what comes back.
-  const narrow = await resolveQuota({
-    now,
-    claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
-    queryDb: () => ({ total: 0 }),
-    liveCache: cache,
-    softTtlMs: 300_000,
-    liveUsage: {
-      five_hour: { utilization: 80, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
-      seven_day: { utilization: 20, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
-    },
-    cachePath: tmpCachePath(),
-  });
-  assert.equal(narrow.source, "live");
-  assert.equal(narrow.cachedAtMs, undefined);
-  assert.equal(narrow.fiveHour.pct, 80);
+  try {
+    await withFakeHome("test-token", async () => {
+      globalThis.fetch = (async () => {
+        fetchAttempts += 1;
+        throw new Error("no network in tests");
+      }) as unknown as typeof globalThis.fetch;
+
+      // 900s TTL: the 400s-old cache is still inside the window, so the fast path serves it and nothing touches the network.
+      const wide = await run(900_000);
+      assert.equal(fetchAttempts, 0);
+      assert.equal(wide.source, "live");
+      assert.equal(wide.cachedAtMs, now.getTime() - 400_000);
+
+      // 300s TTL: the same cache is now outside the window, so a live fetch is attempted. It fails, and the still-usable cache is served as the fallback.
+      const narrow = await run(300_000);
+      assert.equal(fetchAttempts, 1);
+      assert.equal(narrow.source, "live");
+      assert.equal(narrow.cachedAtMs, now.getTime() - 400_000);
+    });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
