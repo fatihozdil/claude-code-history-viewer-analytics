@@ -2,7 +2,7 @@
   "name": "claude-code-history-search-analytics",
   "displayName": "Claude & Codex History Search Analytics",
   "description": "Browse, search, inspect, analyze, and resume Claude Code, Codex and Antigravity conversations directly inside VS Code.",
-  "version": "1.13.4",
+  "version": "1.13.5",
   "publisher": "Fatih-Ozdil",
   "license": "MIT",
   "icon": "media/icon.png",
