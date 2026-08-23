@@ -525,6 +525,12 @@ export async function resolveQuota(opts?: {
   cachePath?: string;
   /** Skip the short-TTL cache fast-path and force a fresh network fetch. */
   force?: boolean;
+  /**
+   * How long a captured snapshot is served without a network call, in
+   * milliseconds. Defaults to `CACHE_SOFT_TTL_MS`. Callers pass the user's
+   * configured poll interval here; see `resolveUsagePollMs`.
+   */
+  softTtlMs?: number;
 }): Promise<QuotaView> {
   const now = opts?.now ?? new Date();
   const estimate = computeQuota(opts);
@@ -561,7 +567,7 @@ export async function resolveQuota(opts?: {
     opts?.liveUsage === undefined &&
     cache &&
     cacheIsUsable(now, cache) &&
-    now.getTime() - cache.capturedAtMs < CACHE_SOFT_TTL_MS
+    now.getTime() - cache.capturedAtMs < (opts?.softTtlMs ?? CACHE_SOFT_TTL_MS)
   ) {
     const fast = buildLive(cache, cache.capturedAtMs);
     if (fast) return fast;

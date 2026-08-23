@@ -401,7 +401,7 @@ test("resolveQuota ignores a cached snapshot whose window has already reset", as
 test("resolveQuota fast-path serves a very fresh cache without a network call", async () => {
   const now = new Date("2026-06-19T14:32:00.000Z");
   // liveUsage is omitted, so without the fast-path this would invoke the real
-  // fetchLiveUsage() (a network call). The fresh cache (10s old, < 90s TTL)
+  // fetchLiveUsage() (a network call). The fresh cache (10s old, < 300s default TTL)
   // must short-circuit and return immediately.
   const result = await resolveQuota({
     now,
@@ -483,4 +483,61 @@ test("resolveUsagePollMs falls back to the default for non-numeric input", () =>
   assert.equal(resolveUsagePollMs(undefined), 300_000);
   assert.equal(resolveUsagePollMs("600"), 300_000);
   assert.equal(resolveUsagePollMs(Number.NaN), 300_000);
+});
+
+test("resolveQuota default TTL serves a 100s-old cache without a network call", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  // liveUsage is omitted, so a fetch would be a real network call. Under the
+  // old 90s TTL this cache was stale; under the 300s default it is served.
+  const result = await resolveQuota({
+    now,
+    claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+    queryDb: () => ({ total: 0 }),
+    liveCache: {
+      capturedAtMs: now.getTime() - 100_000,
+      five_hour: { utilization: 50, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
+      seven_day: { utilization: 10, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
+    },
+  });
+
+  assert.equal(result.source, "live");
+  assert.equal(result.cachedAtMs, now.getTime() - 100_000);
+});
+
+test("resolveQuota honours a caller-supplied softTtlMs", async () => {
+  const now = new Date("2026-06-19T14:32:00.000Z");
+  const cache = {
+    capturedAtMs: now.getTime() - 400_000, // 400s old
+    five_hour: { utilization: 50, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
+    seven_day: { utilization: 10, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
+  };
+
+  // 900s TTL: the 400s-old cache is still inside the window, so no fetch.
+  const wide = await resolveQuota({
+    now,
+    claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+    queryDb: () => ({ total: 0 }),
+    liveCache: cache,
+    softTtlMs: 900_000,
+  });
+  assert.equal(wide.source, "live");
+  assert.equal(wide.cachedAtMs, now.getTime() - 400_000);
+
+  // 300s TTL: the same cache is outside the fast path. liveUsage is injected
+  // so no real network call happens, and the fresh value is what comes back.
+  const narrow = await resolveQuota({
+    now,
+    claudeConfig: { organizationRateLimitTier: "default_claude_ai" },
+    queryDb: () => ({ total: 0 }),
+    liveCache: cache,
+    softTtlMs: 300_000,
+    liveUsage: {
+      five_hour: { utilization: 80, resets_at: new Date(now.getTime() + 60 * 60_000).toISOString() },
+      seven_day: { utilization: 20, resets_at: new Date(now.getTime() + 6 * 86400_000).toISOString() },
+    },
+    cachePath: tmpCachePath(),
+  });
+  assert.equal(narrow.source, "live");
+  assert.equal(narrow.cachedAtMs, undefined);
+  assert.equal(narrow.fiveHour.pct, 80);
 });
