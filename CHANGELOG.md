@@ -2,6 +2,15 @@
 
 All notable changes to this extension are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **The live usage endpoint is polled far less often** - The Claude quota reading was refreshed every 90 seconds, which is more often than `api.anthropic.com/api/oauth/usage` tolerates per account. Because that budget is shared with every other Claude client signed in as the same user, account switchers, status-line tools and dashboards were left permanently rate-limited. The interval is now 300 seconds by default and configurable through the new `claudeHistory.quota.claudeUsagePollSeconds` setting, which also accepts `0` to turn live polling off entirely and show the cached reading or the local token estimate instead.
+
+### Fixed
+- **No usage request when nothing displays the Claude quota** - The endpoint was called on every status bar refresh even when "claude" was not among `claudeHistory.quota.statusBarProviders`, so the request was paid for and the result thrown away.
+- **A rate-limited response is now respected** - After an HTTP 429 the extension stays off the endpoint until the server's `Retry-After` window elapses, clamped between 5 minutes and 24 hours, instead of retrying on the next refresh.
+
 ## [1.13.4] - 2026-08-21
 
 ### Fixed
