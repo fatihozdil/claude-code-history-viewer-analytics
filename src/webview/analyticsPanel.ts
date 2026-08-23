@@ -2,7 +2,7 @@ import * as vscode from "vscode";
 import * as os from "node:os";
 import { randomBytes } from "node:crypto";
 import { buildAnalytics, type AnalyticsData } from "../services/analytics.js";
-import { resolveQuota } from "../services/quota.js";
+import { resolveQuota, resolveUsagePollMs } from "../services/quota.js";
 import { readCodexUsage } from "../codex/usage.js";
 import { readAgyUsage } from "../agy/usage.js";
 import { resolveAgyDir, resolveCodexDir } from "../discovery/paths.js";
@@ -75,7 +75,7 @@ export class AnalyticsPanel {
   /**
    * Re-query the DB and push fresh data to the webview.
    *
-   * `force` bypasses the quota module's 90s soft-TTL throttle (used by the
+   * `force` bypasses the quota module's configured soft-TTL throttle (used by the
    * refresh button). `silent` marks a background pass: failures keep the
    * existing dashboard rather than replacing it with an error banner.
    */
@@ -105,8 +105,18 @@ export class AnalyticsPanel {
   private async _refresh(force: boolean, silent: boolean): Promise<void> {
     try {
       // Prefer real server-side utilization; falls back to cache then estimate.
-      // An explicit refresh-button press forces past the short-TTL throttle.
-      const quota = await resolveQuota({ force });
+      // An explicit refresh-button press forces past the soft-TTL throttle,
+      // but not past a 429 back-off and not past `allowLive: false`.
+      // The panel does show the Claude quota, so a live reading is wanted
+      // here whenever the user has not turned polling off.
+      const pollMs = resolveUsagePollMs(
+        vscode.workspace.getConfiguration("claudeHistory.quota").get("claudeUsagePollSeconds", 300),
+      );
+      const quota = await resolveQuota({
+        force,
+        ...(pollMs !== null ? { softTtlMs: pollMs } : {}),
+        allowLive: pollMs !== null,
+      });
       const config = vscode.workspace.getConfiguration("claudeHistory");
       const home = os.homedir();
       const codexDir = resolveCodexDir(config.get("codexDirPath", ""), home);

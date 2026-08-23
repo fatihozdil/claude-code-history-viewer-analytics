@@ -19,7 +19,7 @@ import { ConversationPanel } from "./webview/conversationPanel.js";
 import { AnalyticsPanel } from "./webview/analyticsPanel.js";
 import { BackupContentProvider } from "./diff/backupContentProvider.js";
 import type { SessionMeta } from "./claude/types.js";
-import { resolveQuota } from "./services/quota.js";
+import { resolveQuota, resolveUsagePollMs } from "./services/quota.js";
 import { deepseekUsageSummary } from "./services/analytics.js";
 import { readAgyUsage } from "./agy/usage.js";
 import { readCodexUsage } from "./codex/usage.js";
@@ -417,7 +417,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // ---- Config change listener ----
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("claudeHistory.quota.statusBarProviders")) {
+      if (
+        e.affectsConfiguration("claudeHistory.quota.statusBarProviders") ||
+        e.affectsConfiguration("claudeHistory.quota.claudeUsagePollSeconds")
+      ) {
         updateQuotaStatus(quotaItem);
       }
       if (e.affectsConfiguration("claudeHistory.autoRefreshInterval")) {
@@ -451,11 +454,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   async function updateQuotaStatus(item: vscode.StatusBarItem): Promise<void> {
     const generation = ++quotaUpdateGeneration;
     try {
-      const quota = await resolveQuota();
-      const configuredProviders = vscode.workspace.getConfiguration("claudeHistory.quota").get<unknown[]>("statusBarProviders", ["claude", "codex"]);
+      const quotaConfig = vscode.workspace.getConfiguration("claudeHistory.quota");
+      const configuredProviders = quotaConfig.get<unknown[]>("statusBarProviders", ["claude", "codex"]);
       const providers = (Array.isArray(configuredProviders) ? configuredProviders : ["claude", "codex"])
         .filter((provider): provider is string => typeof provider === "string" && ["claude", "gemini", "codex", "deepseek", "agy"].includes(provider))
         .slice(0, 2);
+      // The Claude entry is the only thing here that needs a live server
+      // reading. When it is not on the status bar, or the user turned polling
+      // off, resolve from cache/estimate instead of spending a request.
+      const pollMs = resolveUsagePollMs(quotaConfig.get("claudeUsagePollSeconds", 300));
+      const quota = await resolveQuota({
+        ...(pollMs !== null ? { softTtlMs: pollMs } : {}),
+        allowLive: pollMs !== null && providers.includes("claude"),
+      });
       const agyUsage = providers.includes("agy") ? await readAgyUsage(agyDir) : null;
       const codexUsage = providers.includes("codex") ? await readCodexUsage(codexDir) : null;
       // The full analytics aggregation is a multi-second synchronous sql.js

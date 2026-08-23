@@ -531,6 +531,13 @@ export async function resolveQuota(opts?: {
    * configured poll interval here; see `resolveUsagePollMs`.
    */
   softTtlMs?: number;
+  /**
+   * Whether a network call to the usage endpoint is allowed at all. Pass false
+   * when nothing on screen shows the Claude quota, or when the user turned
+   * live polling off: the call then resolves from the cache and finally from
+   * the local estimate, exactly as a failed fetch does.
+   */
+  allowLive?: boolean;
 }): Promise<QuotaView> {
   const now = opts?.now ?? new Date();
   const estimate = computeQuota(opts);
@@ -573,8 +580,13 @@ export async function resolveQuota(opts?: {
     if (fast) return fast;
   }
 
-  // 1. Try a fresh fetch. On success, persist it and serve it.
-  const raw = opts?.liveUsage !== undefined ? opts.liveUsage : await fetchLiveUsage();
+  // 1. Try a fresh fetch. On success, persist it and serve it. A caller that
+  //    displays nothing live passes allowLive:false and skips straight to the
+  //    cache and the estimate below, so a hidden panel never spends a request
+  //    from the shared per-account rate budget.
+  const allowLive = opts?.allowLive ?? true;
+  const raw =
+    opts?.liveUsage !== undefined ? opts.liveUsage : allowLive ? await fetchLiveUsage() : null;
   if (raw) {
     const fresh = buildLive(raw);
     if (fresh) {
