@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  initDb, closeDb, flushDb, dbExec, getDb, sentinelPathFor,
+  initDb, closeDb, flushDb, dbExec, getDb, sentinelPathFor, renameWithRetry,
 } from "../src/storage/db.js";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -145,4 +145,122 @@ test("corruption-recovery path still works when triggered (regression guard)", a
   } finally {
     await closeDb();
   }
+});
+
+/**
+ * Grow the DB to roughly `targetMb` so a persist takes long enough for a
+ * concurrent reader to observe a torn write. A few large blobs beat many
+ * small rows here: the insert loop, not the file write, dominates runtime.
+ */
+async function seedLarge(targetMb: number): Promise<void> {
+  getDb().exec("CREATE TABLE IF NOT EXISTS bloat (id INTEGER PRIMARY KEY, val TEXT);");
+  const blob = "x".repeat(64 * 1024);
+  const rows = Math.ceil((targetMb * 1024 * 1024) / blob.length);
+  for (let i = 0; i < rows; i++) {
+    dbExec("INSERT INTO bloat (val) VALUES (?)", [blob]);
+  }
+  await flushDb();
+}
+
+test("flushDb swaps the database file in rather than rewriting it in place", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root);
+  try {
+    await seedAndFlush();
+    const first = statSync(dbPath).ino;
+
+    dbExec("INSERT INTO bloat (val) VALUES (?)", ["another row"]);
+    await flushDb();
+    const second = statSync(dbPath).ino;
+
+    // An in-place overwrite keeps the same inode. A temp-file-plus-rename
+    // publishes a new file, so the inode has to change.
+    assert.notEqual(second, first, "persist must publish a new file, not overwrite the live one");
+  } finally {
+    await closeDb();
+  }
+});
+
+test("a concurrent reader never observes a partially written database", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root);
+  try {
+    await seedLarge(24);
+    const sizeBefore = statSync(dbPath).size;
+
+    // Make the next flush write a payload of a different size.
+    for (let i = 0; i < 64; i++) {
+      dbExec("INSERT INTO bloat (val) VALUES (?)", ["y".repeat(64 * 1024)]);
+    }
+
+    // Sample the live path as fast as the event loop allows while the flush runs.
+    const seen = new Set<number>();
+    let sampling = true;
+    const sampler = (async () => {
+      while (sampling) {
+        try {
+          seen.add(statSync(dbPath).size);
+        } catch {
+          // A reader hitting a missing file is its own failure mode; record it.
+          seen.add(-1);
+        }
+        await new Promise((r) => setImmediate(r));
+      }
+    })();
+
+    await flushDb();
+    sampling = false;
+    await sampler;
+
+    const sizeAfter = statSync(dbPath).size;
+    const allowed = new Set([sizeBefore, sizeAfter]);
+    const torn = [...seen].filter((s) => !allowed.has(s));
+    assert.deepEqual(
+      torn,
+      [],
+      `readers saw ${torn.length} partial state(s); file must only ever be ${sizeBefore} or ${sizeAfter} bytes`,
+    );
+  } finally {
+    await closeDb();
+  }
+});
+
+/** Build an Error carrying an errno-style `code`, as fs rejections do. */
+function codedError(code: string): NodeJS.ErrnoException {
+  const err = new Error(code) as NodeJS.ErrnoException;
+  err.code = code;
+  return err;
+}
+
+test("rename retries the codes Windows raises while the target is held open", async () => {
+  let calls = 0;
+  await renameWithRetry("from", "to", async () => {
+    calls++;
+    if (calls < 3) throw codedError("EBUSY");
+  });
+  assert.equal(calls, 3, "must retry until the rename goes through");
+});
+
+test("rename gives up immediately on an error that retrying cannot fix", async () => {
+  let calls = 0;
+  await assert.rejects(
+    renameWithRetry("from", "to", async () => {
+      calls++;
+      throw codedError("ENOENT");
+    }),
+    /ENOENT/,
+  );
+  assert.equal(calls, 1, "a missing source must not be retried");
+});
+
+test("rename surfaces the error once the retries are exhausted", async () => {
+  let calls = 0;
+  await assert.rejects(
+    renameWithRetry("from", "to", async () => {
+      calls++;
+      throw codedError("EPERM");
+    }),
+    /EPERM/,
+  );
+  assert.equal(calls, 5, "four backoffs plus the first attempt");
 });
