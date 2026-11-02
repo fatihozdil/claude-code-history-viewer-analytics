@@ -9,7 +9,7 @@ import { buildAnalytics } from "../src/services/analytics.js";
 import { computeQuota } from "../src/services/quota.js";
 import { search } from "../src/services/searchService.js";
 import { loadConversation } from "../src/services/sessionService.js";
-import { closeDb, dbAll, dbExec, initDb } from "../src/storage/db.js";
+import { closeDb, dbAll, dbDataVersion, dbExec, initDb } from "../src/storage/db.js";
 
 const ID = "11111111-1111-4111-8111-111111111111";
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -470,6 +470,75 @@ test("indexing a tool_use with a multi-MB input string bounds the search fragmen
       `largest JSON.stringify output during indexing was ${maxStringifyLength} chars; ` +
         "the full multi-MB tool input was materialized",
     );
+  } finally {
+    await closeDb();
+  }
+});
+
+// Two Claude transcripts carrying the same session id (a resumed or copied file).
+// Only the newer one is the winner; the other is a collision loser.
+function claudeLine(text: string, ts: string): string {
+  return JSON.stringify({ type: "user", sessionId: ID, cwd: "/repo", timestamp: ts, message: { role: "user", content: text } });
+}
+
+async function collisionFixture(): Promise<{ root: string; claudeDir: string; older: string; newer: string }> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "history-collision-"));
+  const claudeDir = path.join(root, ".claude");
+  const projectDir = path.join(claudeDir, "projects", "-repo");
+  await fs.mkdir(projectDir, { recursive: true });
+  const older = path.join(projectDir, "older.jsonl");
+  const newer = path.join(projectDir, "newer.jsonl");
+  await fs.writeFile(older, claudeLine("loser prompt", "2026-07-01T10:00:00Z") + "\n");
+  await fs.writeFile(newer, claudeLine("winner prompt", "2026-07-01T11:00:00Z") + "\n");
+  await fs.utimes(older, new Date("2026-07-01T10:00:00Z"), new Date("2026-07-01T10:00:00Z"));
+  await fs.utimes(newer, new Date("2026-07-01T11:00:00Z"), new Date("2026-07-01T11:00:00Z"));
+  return { root, claudeDir, older, newer };
+}
+
+function messageTexts(): string[] {
+  return dbAll("SELECT search_text FROM messages WHERE session_id = ? ORDER BY ordinal", [ID])
+    .map((row) => String(row.search_text));
+}
+
+test("a collision loser is not re-indexed on a pass with no change", async () => {
+  const data = await collisionFixture();
+  await openTestDb(data.root);
+  try {
+    const roots = { claudeDir: data.claudeDir, codexDir: path.join(data.root, ".codex") };
+    await incrementalIndex(roots, 1024 * 1024);
+    assert.deepEqual(dbAll("SELECT file_path FROM sessions WHERE session_id = ?", [ID]), [{ file_path: data.newer }]);
+    assert.deepEqual(messageTexts().some((t) => t.includes("winner prompt")), true);
+
+    const before = dbDataVersion();
+    await incrementalIndex(roots, 1024 * 1024);
+    assert.equal(dbDataVersion(), before, "an unchanged pass must write nothing");
+    assert.deepEqual(dbAll("SELECT file_path FROM sessions WHERE session_id = ?", [ID]), [{ file_path: data.newer }]);
+  } finally {
+    await closeDb();
+  }
+});
+
+test("a loser that later wins is parsed with its current content before it is written", async () => {
+  const data = await collisionFixture();
+  await openTestDb(data.root);
+  try {
+    const roots = { claudeDir: data.claudeDir, codexDir: path.join(data.root, ".codex") };
+    await incrementalIndex(roots, 1024 * 1024);
+
+    // Grow the loser while it still loses: it must not displace the winner.
+    await fs.appendFile(data.older, claudeLine("loser second line", "2026-07-01T10:05:00Z") + "\n");
+    await fs.utimes(data.older, new Date("2026-07-01T10:05:00Z"), new Date("2026-07-01T10:05:00Z"));
+    await incrementalIndex(roots, 1024 * 1024);
+    assert.deepEqual(dbAll("SELECT file_path FROM sessions WHERE session_id = ?", [ID]), [{ file_path: data.newer }]);
+    assert.equal(messageTexts().some((t) => t.includes("loser second line")), false);
+
+    // The winner disappears: the loser must now be parsed and written in full.
+    await fs.unlink(data.newer);
+    await incrementalIndex(roots, 1024 * 1024);
+    assert.deepEqual(dbAll("SELECT file_path FROM sessions WHERE session_id = ?", [ID]), [{ file_path: data.older }]);
+    const texts = messageTexts();
+    assert.equal(texts.some((t) => t.includes("loser prompt")), true);
+    assert.equal(texts.some((t) => t.includes("loser second line")), true);
   } finally {
     await closeDb();
   }

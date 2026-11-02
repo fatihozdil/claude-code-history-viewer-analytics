@@ -19,6 +19,7 @@ import { extractCost } from "../claude/cost.js";
 import { costForTokens } from "./pricing.js";
 import { countSubagents } from "../claude/subagentMeta.js";
 import { isCodexArchivedSessionPath } from "../discovery/paths.js";
+import type { ClaudeFileEntry } from "../discovery/scanner.js";
 import {
   dbTransaction, dbExec, dbAll, dbGet, getDb, readExternalSqliteTitles,
 } from "../storage/db.js";
@@ -62,6 +63,38 @@ interface ParsedContent {
   messages: NormalizedMessage[];
   fileChanges: FileChange[];
   cost: number | null;
+}
+
+/**
+ * Claude transcripts that lost a session-id collision on the last pass (a
+ * resumed or copied transcript sharing its session id with a newer file). Only
+ * the winner per session id is written, so parsing the losers on every pass
+ * burns CPU for nothing. A loser's meta is reused while its mtime and size are
+ * unchanged. If it wins a later pass, it is parsed then, before it is written.
+ */
+const collisionLosers = new Map<string, { mtimeMs: number; sizeBytes: number; meta: SessionMeta }>();
+
+/** Parse one Claude transcript into the session meta and the content to write for it. */
+function parseClaudeTranscript(
+  entry: ClaudeFileEntry,
+  text: string,
+): { meta: SessionMeta; parsed: ParsedContent } {
+  const rawEntries = parseJsonl(text);
+  const { meta, messages } = normalizeSession(rawEntries, entry.fallbackId);
+  const fullMeta: SessionMeta = {
+    ...meta,
+    projectName: meta.projectPath ? meta.projectName : decodeProjectDirName(entry.projDirName),
+    filePath: entry.filePath,
+    mtimeMs: entry.mtimeMs,
+  };
+  return {
+    meta: fullMeta,
+    parsed: {
+      messages,
+      fileChanges: extractFileChanges(messages, fullMeta.sessionId),
+      cost: extractCost(rawEntries),
+    },
+  };
 }
 
 function isNotFound(error: unknown): boolean {
@@ -190,6 +223,8 @@ async function incrementalIndexNow(
 
   const { claudeFiles, codexFiles, agyFiles, titleBySessionId, completeProviders } = scan;
   const changedSet = new Set(scan.changedPaths);
+  const claudeFileByPath = new Map(claudeFiles.map((entry) => [entry.filePath, entry] as const));
+  const loserHits = new Set<string>();
 
   let agyTitles = new Map<string, string>();
   if (roots.agyDir) {
@@ -235,6 +270,12 @@ async function incrementalIndexNow(
       });
       continue;
     }
+    const loser = collisionLosers.get(entry.filePath);
+    if (loser && loser.mtimeMs === entry.mtimeMs && loser.sizeBytes === entry.sizeBytes) {
+      metas.push(loser.meta);
+      loserHits.add(entry.filePath);
+      continue;
+    }
     let text: string;
     try {
       text = await fsp.readFile(entry.filePath, "utf8");
@@ -242,20 +283,9 @@ async function incrementalIndexNow(
       if (!isNotFound(error)) failedProviders.add("claude");
       continue;
     }
-    const rawEntries = parseJsonl(text);
-    const { meta, messages } = normalizeSession(rawEntries, entry.fallbackId);
-    const fullMeta: SessionMeta = {
-      ...meta,
-      projectName: meta.projectPath ? meta.projectName : decodeProjectDirName(entry.projDirName),
-      filePath: entry.filePath,
-      mtimeMs: entry.mtimeMs,
-    };
+    const { meta: fullMeta, parsed } = parseClaudeTranscript(entry, text);
     metas.push(fullMeta);
-    parsedByPath.set(entry.filePath, {
-      messages,
-      fileChanges: extractFileChanges(messages, fullMeta.sessionId),
-      cost: extractCost(rawEntries),
-    });
+    parsedByPath.set(entry.filePath, parsed);
   }
 
   for (const entry of codexFiles) {
@@ -329,7 +359,34 @@ async function incrementalIndexNow(
     parsedByPath.set(entry.filePath, { messages, fileChanges: [], cost: null });
   }
 
-  const dedupedMetas = resolveSessionCollisions(metas);
+  let dedupedMetas = resolveSessionCollisions(metas);
+
+  // A cached loser that now wins was not parsed this pass. Parse it before it is
+  // written. If the file vanished in the meantime, leave it out of this pass.
+  const vanished = new Set<SessionMeta>();
+  for (const meta of dedupedMetas) {
+    const entry = claudeFileByPath.get(meta.filePath);
+    if (!loserHits.has(meta.filePath) || !entry) continue;
+    try {
+      const text = await fsp.readFile(meta.filePath, "utf8");
+      parsedByPath.set(meta.filePath, parseClaudeTranscript(entry, text).parsed);
+    } catch (error) {
+      if (!isNotFound(error)) failedProviders.add("claude");
+      vanished.add(meta);
+    }
+  }
+  if (vanished.size > 0) dedupedMetas = dedupedMetas.filter((meta) => !vanished.has(meta));
+
+  // Remember this pass's losers, so the next pass can skip re-reading them.
+  const winners = new Set(dedupedMetas);
+  collisionLosers.clear();
+  for (const meta of metas) {
+    const entry = claudeFileByPath.get(meta.filePath);
+    if (!entry || meta.provider !== "claude" || winners.has(meta)) continue;
+    if (entry.sizeBytes > maxFileSizeBytes) continue;
+    collisionLosers.set(meta.filePath, { mtimeMs: entry.mtimeMs, sizeBytes: entry.sizeBytes, meta });
+  }
+
   const selectedPaths = new Set(dedupedMetas.map((meta) => meta.filePath));
   const changedPaths = [
     ...scan.changedPaths,

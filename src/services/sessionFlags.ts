@@ -201,23 +201,30 @@ export function getCustomTitle(sessionId: string): string | null {
  * Re-apply the durable globalState flags onto the DB cache. Call after every
  * index pass (and on activation) so the rebuildable cache reflects the source
  * of truth, even if another window clobbered the shared DB file.
+ *
+ * Only rows that disagree with globalState are written. Every write counts as a
+ * change, so rewriting rows that already match would republish the whole
+ * database on every index pass.
  */
 export function applyFlagsToDb(): void {
   if (!state) return;
-  const pinned = readSet(PINNED_KEY);
-  const archived = readSet(ARCHIVED_KEY);
-  const customTitles = getCustomTitles();
-  // Reset every row to the globalState truth (so unpins/unarchives also propagate).
-  dbExec("UPDATE sessions SET pinned = 0 WHERE pinned <> 0", []);
-  dbExec("UPDATE sessions SET archived = 0 WHERE archived <> 0", []);
-  for (const sid of pinned) {
-    dbExec("UPDATE sessions SET pinned = 1 WHERE session_id = ?", [sid]);
+  syncFlagColumn("pinned", readSet(PINNED_KEY));
+  syncFlagColumn("archived", readSet(ARCHIVED_KEY));
+  for (const [sid, title] of Object.entries(getCustomTitles())) {
+    dbExec("UPDATE sessions SET title = ? WHERE session_id = ? AND title IS NOT ?", [title, sid, title]);
   }
-  for (const sid of archived) {
-    dbExec("UPDATE sessions SET archived = 1 WHERE session_id = ?", [sid]);
+}
+
+/** Make a 0/1 flag column match `desired`, writing only the rows that differ. */
+function syncFlagColumn(column: "pinned" | "archived", desired: Set<string>): void {
+  const cached = new Set(
+    dbAll(`SELECT session_id FROM sessions WHERE ${column} <> 0`).map((row) => String(row.session_id)),
+  );
+  for (const sid of cached) {
+    if (!desired.has(sid)) dbExec(`UPDATE sessions SET ${column} = 0 WHERE session_id = ?`, [sid]);
   }
-  for (const [sid, title] of Object.entries(customTitles)) {
-    dbExec("UPDATE sessions SET title = ? WHERE session_id = ?", [title, sid]);
+  for (const sid of desired) {
+    if (!cached.has(sid)) dbExec(`UPDATE sessions SET ${column} = 1 WHERE session_id = ?`, [sid]);
   }
 }
 

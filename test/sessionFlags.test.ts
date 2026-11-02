@@ -11,8 +11,9 @@ import {
   initSessionFlags,
   setBranchUngrouped,
   getUngroupedBranches,
+  applyFlagsToDb,
 } from "../src/services/sessionFlags.js";
-import { readExternalSqliteTitles } from "../src/storage/db.js";
+import { readExternalSqliteTitles, initDb, closeDb, dbExec, dbGet, getDb } from "../src/storage/db.js";
 import { normalizeSession } from "../src/claude/session.js";
 import { parseJsonl } from "../src/claude/jsonl.js";
 
@@ -109,4 +110,35 @@ test("setBranchUngrouped persists to globalState and getUngroupedBranches reflec
 
   setBranchUngrouped("s1", false);
   assert.deepEqual(getUngroupedBranches(), new Set(["s2"]));
+});
+
+test("applyFlagsToDb writes nothing when the database already matches globalState", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "flags-noop-"));
+  await initDb({ extensionPath: root, globalStorageUri: { fsPath: root } } as any);
+  try {
+    dbExec("INSERT INTO sessions (session_id, file_path, provider, title) VALUES ('s1', '/x/s1.jsonl', 'claude', 'old')");
+    dbExec("INSERT INTO sessions (session_id, file_path, provider, title) VALUES ('s2', '/x/s2.jsonl', 'claude', 'other')");
+    const store = new Map<string, unknown>([
+      ["claudeHistory.pinnedSessions", ["s1"]],
+      ["claudeHistory.archivedSessions", ["s2"]],
+      ["claudeHistory.customTitles", { s1: "Renamed" }],
+    ]);
+    initSessionFlags({
+      get: (key: string, fallback: unknown) => (store.has(key) ? store.get(key) : fallback),
+      update: async (key: string, value: unknown) => { store.set(key, value); },
+    } as any);
+    const totalChanges = () => Number(getDb().exec("SELECT total_changes();")[0].values[0][0]);
+
+    applyFlagsToDb();
+    assert.equal(dbGet("SELECT pinned FROM sessions WHERE session_id = 's1'")?.pinned, 1, "the first pass applies the pin");
+    assert.equal(dbGet("SELECT archived FROM sessions WHERE session_id = 's2'")?.archived, 1, "the first pass applies the archive");
+    assert.equal(dbGet("SELECT title FROM sessions WHERE session_id = 's1'")?.title, "Renamed", "the first pass applies the title");
+
+    const settled = totalChanges();
+    applyFlagsToDb();
+    assert.equal(totalChanges(), settled, "a second pass over the same state must not write any row");
+  } finally {
+    await closeDb();
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

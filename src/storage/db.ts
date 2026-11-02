@@ -4,13 +4,65 @@ import * as fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import initSqlJs from "sql.js";
 import type { Database as SqlJsDb, SqlJsStatic } from "sql.js";
+import { performance } from "node:perf_hooks";
 import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema.js";
 
 let db: SqlJsDb | null = null;
 let dbPath: string | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
 let sqliteStatic: SqlJsStatic | null = null;
+
+/** Delay between a write and its publish, so a burst of writes shares one publish. */
 const PERSIST_DEBOUNCE_MS = 1000;
+/**
+ * Minimum gap between publishes. A publish rewrites the whole database file,
+ * and an active session triggers an index pass every few seconds, so without a
+ * floor the file would be rewritten at that cadence. Writes made inside the gap
+ * are not dropped: they publish when the next slot opens, or on flush/close.
+ */
+const PERSIST_MIN_INTERVAL_MS = 60_000;
+
+export interface DbOptions {
+  /** Overrides the delay between a write and its publish. */
+  persistDebounceMs?: number;
+  /** Overrides the minimum gap between publishes. */
+  persistMinIntervalMs?: number;
+}
+
+let persistDebounceMs = PERSIST_DEBOUNCE_MS;
+let persistMinIntervalMs = PERSIST_MIN_INTERVAL_MS;
+/** Start of the latest publish on the monotonic clock; -Infinity until the first one. */
+let lastPublishAt = Number.NEGATIVE_INFINITY;
+/** Publishes run one after another, so two never write the temp file at once. */
+let publishChain: Promise<unknown> = Promise.resolve();
+/**
+ * Set when the file on disk is behind the database in a way total_changes()
+ * cannot see: after DDL, which it does not count, or after a failed publish.
+ * Cleared when a publish takes its snapshot.
+ */
+let forcePublish = false;
+/**
+ * Identifies the current initDb() session, so a version from a previous
+ * database instance can never match one from this instance.
+ */
+let dbGeneration = 0;
+/**
+ * total_changes() restarts from zero at every export(), so the rows written
+ * before each snapshot are added here. Together they give a count that only
+ * grows while the database is open.
+ */
+let changesBeforeSnapshot = 0;
+
+/**
+ * A value that changes whenever the database contents may have changed, and
+ * stays the same when nothing was written. Callers compare it to decide whether
+ * a derived result (such as the analytics aggregation) must be recomputed.
+ */
+export function dbDataVersion(): string {
+  if (!db) return "none";
+  const sinceSnapshot = Number(getDb().exec("SELECT total_changes();")[0]?.values[0]?.[0] ?? 0);
+  return `${dbGeneration}:${changesBeforeSnapshot + sinceSnapshot}`;
+}
 
 /**
  * Sentinel file marking the on-disk database as possibly-in-progress-write.
@@ -146,7 +198,7 @@ async function publishDatabaseFile(targetPath: string, data: Uint8Array): Promis
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
   const tmpPath = `${targetPath}.tmp-${process.pid}`;
   try {
-    await fs.writeFile(tmpPath, Buffer.from(data));
+    await fs.writeFile(tmpPath, data);
     await renameWithRetry(tmpPath, targetPath);
   } catch (err) {
     await fs.unlink(tmpPath).catch(() => {});
@@ -154,48 +206,85 @@ async function publishDatabaseFile(targetPath: string, data: Uint8Array): Promis
   }
 }
 
-/** Serialize the in-memory DB to disk (debounced). */
+/**
+ * Arm the publish timer. The timer reads the database when it fires, so the
+ * one armed timer covers every write made before then. Later writes do not
+ * re-arm it: a stream of writes would otherwise postpone the publish forever.
+ */
 function schedulePersist(): void {
-  if (!db || !dbPath) return;
-  if (persistTimer) clearTimeout(persistTimer);
-  persistTimer = setTimeout(async () => {
-    if (!db || !dbPath) return;
-    const data = db.export();
-    try {
-      await publishDatabaseFile(dbPath, data);
-    } catch (err) {
-      console.error("[claude-history] failed to persist database:", err);
-    }
+  if (!db || !dbPath || persistTimer) return;
+  const sinceLastPublish = performance.now() - lastPublishAt;
+  const delay = Math.max(persistDebounceMs, persistMinIntervalMs - sinceLastPublish);
+  persistTimer = setTimeout(() => {
     persistTimer = null;
-  }, PERSIST_DEBOUNCE_MS);
+    void enqueuePublish();
+  }, delay);
 }
 
-/** Flush any pending DB writes immediately. Returns whether the flush succeeded. */
+/** Queue a publish behind any already running, so publishes never overlap. */
+function enqueuePublish(): Promise<boolean> {
+  const run = publishChain.then(publishIfChanged);
+  publishChain = run.catch(() => {});
+  return run;
+}
+
+/** True when the file on disk is not the same as the in-memory database. */
+function hasUnpublishedChanges(): boolean {
+  if (forcePublish) return true;
+  // export() reopens the connection, which resets total_changes() to zero, so
+  // this counts the rows written since the last snapshot. A write that changes
+  // no rows adds nothing and so leaves the file alone.
+  return Number(getDb().exec("SELECT total_changes();")[0]?.values[0]?.[0] ?? 0) > 0;
+}
+
+/**
+ * Snapshot and publish the database if it has changed since the last snapshot.
+ * Never rejects: a failure is logged, and the change stays pending for the
+ * next attempt.
+ */
+async function publishIfChanged(): Promise<boolean> {
+  if (!db || !dbPath) return true;
+  const target = dbPath;
+  try {
+    if (!hasUnpublishedChanges()) return true;
+    lastPublishAt = performance.now();
+    const sinceSnapshot = Number(db.exec("SELECT total_changes();")[0]?.values[0]?.[0] ?? 0);
+    const data = db.export();
+    changesBeforeSnapshot += sinceSnapshot;
+    forcePublish = false;
+    await publishDatabaseFile(target, data);
+    return true;
+  } catch (err) {
+    forcePublish = true;
+    console.error("[claude-history] failed to persist database:", err);
+    return false;
+  }
+}
+
+/** Publish any pending DB writes now. Returns whether the file on disk is current. */
 export async function flushDb(): Promise<boolean> {
   if (persistTimer) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
-  if (!db || !dbPath) return true;
-  const data = db.export();
-  try {
-    await publishDatabaseFile(dbPath, data);
-    return true;
-  } catch (err) {
-    console.error("[claude-history] failed to flush database:", err);
-    return false;
-  }
+  return enqueuePublish();
 }
 
 /** Initialize or open the sql.js database. */
-export async function initDb(context: vscode.ExtensionContext): Promise<SqlJsDb> {
+export async function initDb(context: vscode.ExtensionContext, options: DbOptions = {}): Promise<SqlJsDb> {
   const wasmFile = locateWasm(context);
 
   // sql.js 1.x: locateFile is set during init, not on the module.
   const SQL: SqlJsStatic = await initSqlJs({ locateFile: () => wasmFile });
   sqliteStatic = SQL;
+  persistDebounceMs = options.persistDebounceMs ?? PERSIST_DEBOUNCE_MS;
+  persistMinIntervalMs = options.persistMinIntervalMs ?? PERSIST_MIN_INTERVAL_MS;
+  lastPublishAt = Number.NEGATIVE_INFINITY;
+  forcePublish = false;
+  dbGeneration++;
+  changesBeforeSnapshot = 0;
 
-  dbPath = path.join(context.globalStorageUri.fsPath, "history.sqlite");
+  dbPath =path.join(context.globalStorageUri.fsPath, "history.sqlite");
 
   let buffer: Uint8Array | undefined;
   try {
@@ -362,6 +451,7 @@ export function dbExec(sql: string, params?: unknown[]): number {
 /** Convenience: run raw DDL (schema, index creation). */
 export function dbExecDdl(sql: string): void {
   getDb().exec(sql);
+  forcePublish = true;
   schedulePersist();
 }
 

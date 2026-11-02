@@ -4,8 +4,10 @@ import * as fs from "node:fs/promises";
 import { existsSync, statSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import initSqlJs from "sql.js";
 import {
-  initDb, closeDb, flushDb, dbExec, getDb, sentinelPathFor, renameWithRetry,
+  initDb, closeDb, flushDb, dbExec, dbExecDdl, getDb, sentinelPathFor, renameWithRetry, dbDataVersion,
+  type DbOptions,
 } from "../src/storage/db.js";
 
 const REPO_ROOT = path.resolve(__dirname, "../..");
@@ -15,11 +17,11 @@ async function makeRoot(): Promise<{ root: string; dbPath: string }> {
   return { root, dbPath: path.join(root, "storage", "history.sqlite") };
 }
 
-async function openTestDb(root: string): Promise<void> {
+async function openTestDb(root: string, options?: DbOptions): Promise<void> {
   await initDb({
     extensionPath: REPO_ROOT,
     globalStorageUri: { fsPath: path.join(root, "storage") },
-  } as any);
+  } as any, options);
 }
 
 /** Grow the DB with enough rows to span multiple sqlite pages, then flush. */
@@ -263,4 +265,199 @@ test("rename surfaces the error once the retries are exhausted", async () => {
     /EPERM/,
   );
   assert.equal(calls, 5, "four backoffs plus the first attempt");
+});
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** Read a single value from the database file on disk, through an independent sql.js handle. */
+async function valueOnDisk(dbPath: string, sql: string): Promise<unknown> {
+  const SQL = await initSqlJs({ locateFile: () => require.resolve("sql.js/dist/sql-wasm.wasm") });
+  const onDisk = new SQL.Database(new Uint8Array(await fs.readFile(dbPath)));
+  try {
+    return onDisk.exec(sql)[0]?.values[0]?.[0];
+  } finally {
+    onDisk.close();
+  }
+}
+
+/**
+ * Count the temp-file writes that publishes make. `delayMs` holds each write
+ * open, so two publishes running at once show up as more than one in flight.
+ */
+function trackPublishes(delayMs: number): {
+  started(): number;
+  maxInFlight(): number;
+  restore(): void;
+} {
+  const realFs = require("node:fs/promises");
+  const original = realFs.writeFile;
+  let started = 0;
+  let inFlight = 0;
+  let maxInFlight = 0;
+  realFs.writeFile = async (file: unknown, ...rest: unknown[]) => {
+    if (!String(file).includes(".tmp-")) return original(file, ...rest);
+    started++;
+    inFlight++;
+    maxInFlight = Math.max(maxInFlight, inFlight);
+    try {
+      if (delayMs > 0) await sleep(delayMs);
+      return await original(file, ...rest);
+    } finally {
+      inFlight--;
+    }
+  };
+  return {
+    started: () => started,
+    maxInFlight: () => maxInFlight,
+    restore: () => { realFs.writeFile = original; },
+  };
+}
+
+test("a flush with nothing new since the last publish leaves the file alone", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root);
+  try {
+    await seedAndFlush();
+    const published = statSync(dbPath).ino;
+
+    assert.equal(await flushDb(), true);
+    assert.equal(statSync(dbPath).ino, published, "an unchanged database must not be rewritten");
+  } finally {
+    await closeDb();
+  }
+});
+
+test("a write that changes no rows does not republish the database", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root);
+  try {
+    await seedAndFlush();
+    const published = statSync(dbPath).ino;
+
+    dbExec("UPDATE bloat SET val = 'unchanged' WHERE id = -1");
+    await flushDb();
+    assert.equal(statSync(dbPath).ino, published, "a write that matches no rows must not rewrite the file");
+  } finally {
+    await closeDb();
+  }
+});
+
+test("a schema-only change is still published", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root);
+  try {
+    await seedAndFlush();
+    const published = statSync(dbPath).ino;
+
+    dbExecDdl("CREATE TABLE IF NOT EXISTS extra (x INTEGER);");
+    await flushDb();
+    assert.notEqual(statSync(dbPath).ino, published, "DDL does not move total_changes(), so it must still publish");
+    assert.equal(await valueOnDisk(dbPath, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'extra'"), 1);
+  } finally {
+    await closeDb();
+  }
+});
+
+test("concurrent flushes never run two publishes at once", async () => {
+  const { root } = await makeRoot();
+  await openTestDb(root);
+  try {
+    await seedAndFlush();
+    dbExec("INSERT INTO bloat (val) VALUES (?)", ["pending"]);
+
+    const tracker = trackPublishes(150);
+    try {
+      await Promise.all([flushDb(), flushDb()]);
+      assert.equal(tracker.maxInFlight(), 1, "the second flush must wait for the first publish, not overlap it");
+    } finally {
+      tracker.restore();
+    }
+  } finally {
+    await closeDb();
+  }
+});
+
+test("sustained writes publish at most once per minimum interval, and every write still lands", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root, { persistMinIntervalMs: 6000 });
+  const tracker = trackPublishes(0);
+  try {
+    getDb().exec("CREATE TABLE IF NOT EXISTS bloat (id INTEGER PRIMARY KEY, val TEXT);");
+    // Writes 1.2s apart: every gap is longer than the 1s debounce, which is the
+    // cadence watcher passes produce. Without a floor, each write publishes.
+    for (let i = 0; i < 3; i++) {
+      dbExec("INSERT INTO bloat (val) VALUES (?)", [`row ${i}`]);
+      await sleep(1200);
+    }
+    assert.ok(tracker.started() <= 1, `published ${tracker.started()} times while writes were arriving; the 6s floor allows one`);
+
+    await flushDb();
+    assert.equal(await valueOnDisk(dbPath, "SELECT COUNT(*) FROM bloat"), 3, "every write must reach the file");
+  } finally {
+    tracker.restore();
+    await closeDb();
+  }
+});
+
+test("a failed publish is reported, and the next flush publishes the same change", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root);
+  try {
+    await seedAndFlush();
+    dbExec("INSERT INTO bloat (val) VALUES (?)", ["after failure"]);
+
+    const realFs = require("node:fs/promises");
+    const original = realFs.writeFile;
+    realFs.writeFile = async (file: unknown, ...rest: unknown[]) => {
+      if (String(file).includes(".tmp-")) {
+        realFs.writeFile = original;
+        throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+      }
+      return original(file, ...rest);
+    };
+    try {
+      assert.equal(await flushDb(), false, "a failed publish must be reported");
+    } finally {
+      realFs.writeFile = original;
+    }
+
+    assert.equal(await flushDb(), true, "the next flush must retry the change that failed");
+    assert.equal(await valueOnDisk(dbPath, "SELECT COUNT(*) FROM bloat WHERE val = 'after failure'"), 1);
+  } finally {
+    await closeDb();
+  }
+});
+
+test("dbDataVersion moves on a write, stays put across no-op writes and publishes, and resets per init", async () => {
+  const { root } = await makeRoot();
+  await openTestDb(root);
+  try {
+    getDb().exec("CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, v TEXT);");
+    dbExec("INSERT INTO t (v) VALUES ('a')");
+    const afterWrite = dbDataVersion();
+
+    // Nothing written: the version must not move.
+    assert.equal(dbDataVersion(), afterWrite);
+
+    // A publish resets the connection's total_changes(); the version must still not move.
+    await flushDb();
+    assert.equal(dbDataVersion(), afterWrite, "publishing alone must not look like a data change");
+
+    // An UPDATE that matches no row changes nothing.
+    dbExec("UPDATE t SET v = 'zz' WHERE id = -1");
+    assert.equal(dbDataVersion(), afterWrite);
+
+    // A real write after the publish must move the version.
+    dbExec("INSERT INTO t (v) VALUES ('b')");
+    const afterSecond = dbDataVersion();
+    assert.notEqual(afterSecond, afterWrite);
+
+    // A later re-open of the database must never reuse an earlier version.
+    await closeDb();
+    await openTestDb(root);
+    assert.notEqual(dbDataVersion(), afterSecond);
+    assert.notEqual(dbDataVersion(), afterWrite);
+  } finally {
+    await closeDb();
+  }
 });

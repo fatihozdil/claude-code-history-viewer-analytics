@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as os from "node:os";
 import { randomBytes } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { buildAnalytics, type AnalyticsData } from "../services/analytics.js";
 import { resolveQuota, resolveUsagePollMs } from "../services/quota.js";
 import { readCodexUsage } from "../codex/usage.js";
@@ -8,6 +9,12 @@ import { readAgyUsage } from "../agy/usage.js";
 import { resolveAgyDir, resolveCodexDir } from "../discovery/paths.js";
 import { PROVIDER_ICON_MARKUP } from "./providerIcons.js";
 import { createPollTimer, ANALYTICS_REFRESH_MS, type PollTimer } from "../services/pollTimer.js";
+import { dbDataVersion } from "../storage/db.js";
+import {
+  decideRefresh,
+  deferDelayMs,
+  type BuildRecord,
+} from "../services/analyticsRefreshGate.js";
 
 /**
  * Singleton webview panel for the analytics dashboard.
@@ -28,6 +35,9 @@ export class AnalyticsPanel {
   private _refreshPromise: Promise<void> | undefined;
   private _inFlightForce = false;
   private _pollTimer: PollTimer | undefined;
+  /** What the last successful build was based on; drives the silent-refresh gate. */
+  private _lastBuild: BuildRecord | undefined;
+  private _deferTimer: ReturnType<typeof setTimeout> | undefined;
 
   public static createOrShow(extensionUri: vscode.Uri, state: vscode.Memento): AnalyticsPanel {
     if (AnalyticsPanel.current) {
@@ -92,8 +102,29 @@ export class AnalyticsPanel {
       if (this._refreshPromise) return this._refreshPromise;
     }
 
+    // A background pass only rebuilds when the database changed. Watcher passes
+    // fire every few seconds during an active session, and each rebuild costs
+    // seconds of CPU, so most of them are skipped or deferred here.
+    const now = performance.now();
+    const version = dbDataVersion();
+    if (!force && silent) {
+      const decision = decideRefresh({
+        force,
+        silent,
+        now,
+        last: this._lastBuild,
+        version,
+        day: new Date().toDateString(),
+      });
+      if (decision === "skip") return;
+      if (decision === "defer") {
+        this._scheduleDeferred();
+        return;
+      }
+    }
+
     this._inFlightForce = force;
-    this._refreshPromise = this._refresh(force, silent);
+    this._refreshPromise = this._refresh(force, silent, version);
     try {
       await this._refreshPromise;
     } finally {
@@ -102,7 +133,20 @@ export class AnalyticsPanel {
     }
   }
 
-  private async _refresh(force: boolean, silent: boolean): Promise<void> {
+  /**
+   * Run one silent rebuild when the minimum gap has passed, so the last change
+   * in a burst still reaches the dashboard. Only one such timer is pending.
+   */
+  private _scheduleDeferred(): void {
+    if (this._deferTimer || !this._lastBuild) return;
+    this._deferTimer = setTimeout(() => {
+      this._deferTimer = undefined;
+      void this.refresh({ silent: true });
+    }, deferDelayMs(this._lastBuild, performance.now()));
+  }
+
+  private async _refresh(force: boolean, silent: boolean, version: string): Promise<void> {
+    const builtAt = performance.now();
     try {
       // Prefer real server-side utilization; falls back to cache then estimate.
       // An explicit refresh-button press forces past the soft-TTL throttle,
@@ -129,6 +173,9 @@ export class AnalyticsPanel {
       const updatedAt = Date.now();
       await this._panel.webview.postMessage({ type: "data", payload: data, updatedAt });
       await this._state.update(AnalyticsPanel.CACHE_KEY, { data, updatedAt });
+      // Recorded with the version read before the build, so a write that lands
+      // during the build still counts as a change on the next pass.
+      this._lastBuild = { version, day: new Date().toDateString(), at: builtAt };
     } catch (err) {
       if (silent) {
         // A background refresh that fails leaves the last good dashboard in
@@ -176,6 +223,8 @@ export class AnalyticsPanel {
   dispose(): void {
     this._pollTimer?.dispose();
     this._pollTimer = undefined;
+    if (this._deferTimer) clearTimeout(this._deferTimer);
+    this._deferTimer = undefined;
     AnalyticsPanel.current = undefined;
     this._panel.dispose();
     while (this._disposables.length) {
