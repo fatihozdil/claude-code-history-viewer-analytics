@@ -42,7 +42,8 @@ async function main() {
     platform: "node",
     target: "node18",
     outfile: "dist/extension.js",
-    external: ["vscode", "sql.js/dist/sql-wasm.wasm"],
+    // node:sqlite is loaded at runtime when the host has it (see src/storage/nativeSqlite.ts).
+    external: ["vscode", "sql.js/dist/sql-wasm.wasm", "node:sqlite"],
     sourcemap: !production,
     minify: production,
     logLevel: "info",

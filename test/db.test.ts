@@ -7,6 +7,7 @@ import * as path from "node:path";
 import initSqlJs from "sql.js";
 import {
   initDb, closeDb, flushDb, dbExec, dbExecDdl, getDb, sentinelPathFor, renameWithRetry, dbDataVersion,
+  PERSIST_MIN_INTERVAL_MS,
   type DbOptions,
 } from "../src/storage/db.js";
 
@@ -17,11 +18,12 @@ async function makeRoot(): Promise<{ root: string; dbPath: string }> {
   return { root, dbPath: path.join(root, "storage", "history.sqlite") };
 }
 
+/** Every test here covers the sql.js engine, which saves by rewriting the file. */
 async function openTestDb(root: string, options?: DbOptions): Promise<void> {
   await initDb({
     extensionPath: REPO_ROOT,
     globalStorageUri: { fsPath: path.join(root, "storage") },
-  } as any, options);
+  } as any, { engine: "sqljs", ...options });
 }
 
 /** Grow the DB with enough rows to span multiple sqlite pages, then flush. */
@@ -457,6 +459,97 @@ test("dbDataVersion moves on a write, stays put across no-op writes and publishe
     await openTestDb(root);
     assert.notEqual(dbDataVersion(), afterSecond);
     assert.notEqual(dbDataVersion(), afterWrite);
+  } finally {
+    await closeDb();
+  }
+});
+
+/** Wait until `check` passes, polling; fails after `timeoutMs`. */
+async function eventually(check: () => boolean, timeoutMs: number, message: string): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!check()) {
+    if (Date.now() > deadline) assert.fail(message);
+    await sleep(25);
+  }
+}
+
+test("the default gap between sql.js saves is 30 minutes", () => {
+  assert.equal(PERSIST_MIN_INTERVAL_MS, 30 * 60_000);
+});
+
+test("a timed save compacts a database that is mostly free pages", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root, { persistDebounceMs: 20, persistMinIntervalMs: 0, vacuumMinIntervalMs: 0 });
+  try {
+    await seedAndFlush();
+    const full = statSync(dbPath).size;
+
+    dbExec("DELETE FROM bloat WHERE id > 100");
+    await eventually(() => statSync(dbPath).size < full / 2, 5000, "the timed save did not compact the file");
+
+    assert.equal(await valueOnDisk(dbPath, "SELECT COUNT(*) FROM bloat"), 100, "compaction must keep every live row");
+    assert.equal(await valueOnDisk(dbPath, "PRAGMA freelist_count"), 0);
+  } finally {
+    await closeDb();
+  }
+});
+
+test("a flush (as on close) saves without compacting", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root, { persistMinIntervalMs: 60_000, vacuumMinIntervalMs: 0 });
+  try {
+    await seedAndFlush();
+    dbExec("DELETE FROM bloat WHERE id > 100");
+    await flushDb();
+    assert.equal(await valueOnDisk(dbPath, "SELECT COUNT(*) FROM bloat"), 100);
+    assert.ok(Number(await valueOnDisk(dbPath, "PRAGMA freelist_count")) > 0, "a flush must not spend time compacting");
+  } finally {
+    await closeDb();
+  }
+});
+
+test("a database with little free space is not compacted", async () => {
+  const { root, dbPath } = await makeRoot();
+  await openTestDb(root, { persistDebounceMs: 20, persistMinIntervalMs: 0, vacuumMinIntervalMs: 0 });
+  try {
+    await seedAndFlush();
+    dbExec("DELETE FROM bloat WHERE id > 2900");
+    await sleep(300); // let the timed save (the one allowed to compact) run
+    await flushDb();
+    assert.ok(Number(await valueOnDisk(dbPath, "PRAGMA freelist_count")) > 0, "a few free pages are not worth a rebuild");
+  } finally {
+    await closeDb();
+  }
+});
+
+test("startup removes stale temp files and keeps only the newest corrupt backups", async () => {
+  const { root } = await makeRoot();
+  const storage = path.join(root, "storage");
+  await fs.mkdir(storage, { recursive: true });
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3600_000);
+  const put = async (name: string, when: Date) => {
+    await fs.writeFile(path.join(storage, name), "x");
+    await fs.utimes(path.join(storage, name), when, when);
+  };
+  await put("history.sqlite.tmp-111", hoursAgo(3));
+  await put("history.db.tmp-222", hoursAgo(3));
+  await put("history.sqlite.tmp-333", new Date());
+  await put("history.sqlite.corrupt-a", hoursAgo(40));
+  await put("history.sqlite.corrupt-b", hoursAgo(30));
+  await put("history.sqlite.corrupt-c", hoursAgo(20));
+  await put("history.db.corrupt-d", hoursAgo(10));
+
+  await openTestDb(root);
+  try {
+    const names = new Set(await fs.readdir(storage));
+    assert.equal(names.has("history.sqlite.tmp-111"), false, "an abandoned temp file must be removed");
+    assert.equal(names.has("history.db.tmp-222"), false, "an abandoned temp file must be removed");
+    assert.equal(names.has("history.sqlite.tmp-333"), true, "a temp file another window may be writing must stay");
+    assert.deepEqual(
+      [...names].filter((n) => n.includes(".corrupt-")).sort(),
+      ["history.db.corrupt-d", "history.sqlite.corrupt-c"],
+      "only the two newest corrupt backups are kept",
+    );
   } finally {
     await closeDb();
   }

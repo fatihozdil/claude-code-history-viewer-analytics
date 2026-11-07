@@ -376,7 +376,9 @@ test("corrupt database is preserved and replaced with a fresh index", async () =
   try {
     assert.deepEqual(dbAll("SELECT value FROM meta WHERE key = 'schema_version'"), [{ value: "5" }]);
     const files = await fs.readdir(storage);
-    const backup = files.find((name) => name.startsWith("history.sqlite.corrupt-"));
+    // The sql.js engine keeps it as history.sqlite.corrupt-*; node:sqlite first
+    // moves history.sqlite to history.db, so it keeps history.db.corrupt-*.
+    const backup = files.find((name) => /^history\.(sqlite|db)\.corrupt-/.test(name));
     assert.ok(backup);
     assert.equal(await fs.readFile(path.join(storage, backup), "utf8"), "not a sqlite database");
   } finally {
@@ -539,6 +541,59 @@ test("a loser that later wins is parsed with its current content before it is wr
     const texts = messageTexts();
     assert.equal(texts.some((t) => t.includes("loser prompt")), true);
     assert.equal(texts.some((t) => t.includes("loser second line")), true);
+  } finally {
+    await closeDb();
+  }
+});
+
+test("re-indexing a changed transcript rewrites only the message rows that changed", async () => {
+  const data = await fixture();
+  await openTestDb(data.root);
+  try {
+    const roots = { claudeDir: data.claudeDir, codexDir: data.codexDir };
+    const file = path.join(data.claudeDir, "projects", "-repo", `${ID}.jsonl`);
+    const assistantLine = (text: string, ts: string) => JSON.stringify({
+      type: "assistant", sessionId: ID, cwd: "/repo", timestamp: ts,
+      message: { role: "assistant", model: "claude-sonnet-4-5", content: [{ type: "text", text }] },
+    });
+    const touch = (iso: string) => fs.utimes(file, new Date(iso), new Date(iso));
+    const rowids = () => new Map(
+      dbAll("SELECT uuid, rowid AS rid FROM messages WHERE session_id = ?", [ID])
+        .map((row) => [String(row.uuid), Number(row.rid)] as const),
+    );
+
+    await fs.writeFile(file, [
+      claudeLine("first question", "2026-07-01T10:00:00Z"),
+      assistantLine("first answer", "2026-07-01T10:00:10Z"),
+    ].join("\n") + "\n");
+    await touch("2026-07-01T10:00:10Z");
+    await incrementalIndex(roots, 1024 * 1024);
+    const before = rowids();
+    assert.equal(before.size, 2);
+
+    // Claude appends a turn: the existing rows must be left exactly where they are.
+    await fs.appendFile(file, [
+      claudeLine("second question", "2026-07-01T10:01:00Z"),
+      assistantLine("second answer", "2026-07-01T10:01:10Z"),
+    ].join("\n") + "\n");
+    await touch("2026-07-01T10:01:10Z");
+    await incrementalIndex(roots, 1024 * 1024);
+    const after = rowids();
+    assert.equal(after.size, 4);
+    for (const [uuid, rid] of before) {
+      assert.equal(after.get(uuid), rid, `${uuid} was deleted and re-inserted although it did not change`);
+    }
+    assert.deepEqual(messageTexts(), ["first question", "first answer", "second question", "second answer"]);
+
+    // An edited message is rewritten, and messages that are gone are removed.
+    await fs.writeFile(file, [
+      claudeLine("first question", "2026-07-01T10:00:00Z"),
+      assistantLine("first answer, edited", "2026-07-01T10:00:10Z"),
+    ].join("\n") + "\n");
+    await touch("2026-07-01T10:02:00Z");
+    await incrementalIndex(roots, 1024 * 1024);
+    assert.deepEqual(messageTexts(), ["first question", "first answer, edited"]);
+    assert.equal(rowids().size, 2);
   } finally {
     await closeDb();
   }
