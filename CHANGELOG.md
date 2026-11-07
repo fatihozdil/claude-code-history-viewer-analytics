@@ -2,7 +2,14 @@
 
 All notable changes to this extension are documented in this file.
 
-## [Unreleased]
+## [1.14.0] - 2026-11-07
+
+### Fixed
+- **The history database is no longer rewritten in full while you work** - Since 1.13.7 the database file was rewritten at most once a minute, but each write was still the whole file, because the SQLite library the extension used (sql.js) keeps the database in memory and can only save all of it at once. On a 400 MB history that was about 24 GB of disk writes an hour during an active session. On VS Code 1.101 and later, the extension now uses the SQLite built into VS Code (`node:sqlite`), which writes only the changed parts of the file: one active minute writes well under 1 MB, whatever the size of the history. Re-indexing a session also writes only its new or changed messages instead of the whole session again. Windows now share one database file with proper locking, and the database no longer has to be held in memory in every window. The existing index is carried over on the first start (to `history.db`), and the old `history.sqlite` is removed. ([#23](https://github.com/fatihozdil/claude-code-history-viewer-analytics/issues/23))
+- **Older VS Code versions save far less often** - On VS Code before 1.101, where `node:sqlite` is not available, the extension keeps using sql.js but now saves the database at most every 30 minutes and when VS Code closes, instead of every minute. If VS Code exits before a save, the next start re-indexes the sessions that changed; pins, archives and renames are stored separately and are unaffected. A save also compacts the file (at most once a day) when a quarter or more of it is unused space.
+- **Leftover database copies are cleaned up** - Unfinished temporary files from interrupted saves are deleted after an hour, and only the two newest `.corrupt-*` backups of a damaged database are kept, instead of every backup ever made.
+
+## [1.13.5 – 1.13.7]
 
 ### Changed
 - **The live usage endpoint is polled far less often** - The Claude quota reading was refreshed every 90 seconds, which is more often than `api.anthropic.com/api/oauth/usage` tolerates per account. Because that budget is shared with every other Claude client signed in as the same user, account switchers, status-line tools and dashboards were left permanently rate-limited. The interval is now 300 seconds by default and configurable through the new `claudeHistory.quota.claudeUsagePollSeconds` setting, which also accepts `0` to turn live polling off entirely and show the cached reading or the local token estimate instead.

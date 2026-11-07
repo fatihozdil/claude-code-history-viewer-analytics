@@ -21,7 +21,7 @@ import { countSubagents } from "../claude/subagentMeta.js";
 import { isCodexArchivedSessionPath } from "../discovery/paths.js";
 import type { ClaudeFileEntry } from "../discovery/scanner.js";
 import {
-  dbTransaction, dbExec, dbAll, dbGet, getDb, readExternalSqliteTitles,
+  dbTransaction, dbExec, dbAll, dbGet, dbPrepare, readExternalSqliteTitles,
 } from "../storage/db.js";
 import {
   SESSION_COLUMNS, SESSION_PLACEHOLDERS,
@@ -427,19 +427,12 @@ async function incrementalIndexNow(
       if (!changedSetFinal.has(meta.filePath)) continue;
       processed += 1;
 
-      // Delete old rows for this session
       dbTransaction(() => {
-        dbExec("DELETE FROM messages WHERE session_id = ?", [meta.sessionId]);
-        dbExec("DELETE FROM file_changes WHERE session_id = ?", [meta.sessionId]);
-
-        // Upsert session metadata
-        if (meta.messageCount > 0) {
-          const parsed = parsedByPath.get(meta.filePath);
-          if (parsed) {
-            writeSessionContent(meta.sessionId, parsed.messages, parsed.fileChanges);
-            meta.cost = parsed.cost;
-          }
-        }
+        // Bring the session's rows in line with the parse. A session without
+        // parsed content (a large-file placeholder) keeps no rows.
+        const parsed = meta.messageCount > 0 ? parsedByPath.get(meta.filePath) : undefined;
+        syncSessionContent(meta.sessionId, parsed?.messages ?? [], parsed?.fileChanges ?? []);
+        if (parsed) meta.cost = parsed.cost;
 
         meta.subagentCount = countSubagents(meta.sessionId, meta.filePath);
 
@@ -511,67 +504,110 @@ async function incrementalIndexNow(
   onProgress?.({ phase: "complete", scanned: totalWork, total: totalWork, message: "Index complete" });
 }
 
-/** Write pre-parsed messages + file_changes for a changed session (cost is already known from the parse). */
-function writeSessionContent(
+const MESSAGE_COLUMNS = [
+  "session_id", "uuid", "parent_uuid", "role", "entry_type", "ts", "ordinal", "search_text",
+  "input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens", "model",
+] as const;
+
+/** Treat a missing value and NULL alike when comparing a row with its stored copy. */
+function sameValues(stored: Record<string, unknown>, columns: readonly string[], row: unknown[]): boolean {
+  return columns.every((column, i) => (stored[column] ?? null) === (row[i] ?? null));
+}
+
+/**
+ * Make the stored messages and file changes of one session match a fresh parse,
+ * writing only the rows that differ. Claude appends to a live transcript every
+ * few seconds; deleting and re-inserting every row of it on each pass made a
+ * file-backed database write the whole session again each time (#23), while
+ * an append now writes just the new rows.
+ */
+function syncSessionContent(
   sessionId: string,
   messages: NormalizedMessage[],
   fileChanges: FileChange[],
 ): void {
-  const db = getDb();
-  const insMsg = db.prepare(
-    `INSERT OR REPLACE INTO messages (session_id, uuid, parent_uuid, role, entry_type, ts, ordinal, search_text, input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens, model)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  const stored = new Map(
+    dbAll(`SELECT ${MESSAGE_COLUMNS.join(", ")} FROM messages WHERE session_id = ?`, [sessionId])
+      .map((row) => [String(row.uuid), row] as const),
   );
-  const insFc = db.prepare(
-    `INSERT INTO file_changes (${FILE_CHANGE_COLUMNS}) VALUES (${FILE_CHANGE_PLACEHOLDERS})`,
+  const upsert = dbPrepare(
+    `INSERT OR REPLACE INTO messages (${MESSAGE_COLUMNS.join(", ")}) VALUES (${MESSAGE_COLUMNS.map(() => "?").join(", ")})`,
   );
-
-  for (const msg of messages) {
-    // Collect searchable text from all text parts
-    const searchParts: string[] = [];
-    for (const part of msg.parts) {
-      if (part.kind === "text") searchParts.push(part.text);
-      else if (part.kind === "tool_use") {
-        // Make tool calls + their input searchable
-        searchParts.push(part.name);
-        const filePath = part.input?.file_path;
-        if (typeof filePath === "string") searchParts.push(filePath);
-        try {
-          searchParts.push(
-            JSON.stringify(part.input, truncatingReplacer).slice(0, SEARCH_FRAGMENT_MAX_CHARS),
-          );
-        } catch {
-          // Parsed JSONL inputs should be serializable; skip a malformed value.
-        }
-      } else if (part.kind === "tool_result") {
-        searchParts.push(part.text.slice(0, 2000)); // cap per-message tool output
-      }
+  try {
+    for (const row of messages.map((msg) => messageRow(sessionId, msg))) {
+      const uuid = String(row[1]);
+      const existing = stored.get(uuid);
+      stored.delete(uuid);
+      if (existing && sameValues(existing, MESSAGE_COLUMNS, row)) continue;
+      upsert.run(row);
     }
-    const searchText = searchParts.join(" \n ");
-
-    insMsg.run([
-      sessionId,
-      `${sessionId}-${msg.index}`,  // synthetic UUID
-      null,
-      msg.role,
-      null,
-      msg.timestamp ?? null,
-      msg.index,
-      searchText,
-      msg.inputTokens ?? null,
-      msg.outputTokens ?? null,
-      msg.cacheCreationTokens ?? null,
-      msg.cacheReadTokens ?? null,
-      msg.model ?? null,
-    ]);
+  } finally {
+    upsert.free();
+  }
+  // Whatever was not matched is no longer in the transcript.
+  for (const uuid of stored.keys()) {
+    dbExec("DELETE FROM messages WHERE uuid = ?", [uuid]);
   }
 
-  for (const fc of fileChanges) {
-    insFc.run(fileChangeToRow(fc));
+  // File changes have no key; they are few, so compare the whole list and
+  // rewrite it only when something differs.
+  const fcColumns = FILE_CHANGE_COLUMNS.split(",").map((c) => c.trim());
+  const storedChanges = dbAll(
+    `SELECT ${FILE_CHANGE_COLUMNS} FROM file_changes WHERE session_id = ? ORDER BY rowid`,
+    [sessionId],
+  );
+  const freshChanges = fileChanges.map(fileChangeToRow);
+  const unchanged = storedChanges.length === freshChanges.length
+    && storedChanges.every((row, i) => sameValues(row, fcColumns, freshChanges[i]));
+  if (unchanged) return;
+  dbExec("DELETE FROM file_changes WHERE session_id = ?", [sessionId]);
+  const insert = dbPrepare(`INSERT INTO file_changes (${FILE_CHANGE_COLUMNS}) VALUES (${FILE_CHANGE_PLACEHOLDERS})`);
+  try {
+    for (const row of freshChanges) insert.run(row);
+  } finally {
+    insert.free();
   }
+}
 
-  insMsg.free();
-  insFc.free();
+/** The messages row for one normalized message, in MESSAGE_COLUMNS order. */
+function messageRow(sessionId: string, msg: NormalizedMessage): unknown[] {
+  // Collect searchable text from all text parts
+  const searchParts: string[] = [];
+  for (const part of msg.parts) {
+    if (part.kind === "text") searchParts.push(part.text);
+    else if (part.kind === "tool_use") {
+      // Make tool calls + their input searchable
+      searchParts.push(part.name);
+      const filePath = part.input?.file_path;
+      if (typeof filePath === "string") searchParts.push(filePath);
+      try {
+        searchParts.push(
+          JSON.stringify(part.input, truncatingReplacer).slice(0, SEARCH_FRAGMENT_MAX_CHARS),
+        );
+      } catch {
+        // Parsed JSONL inputs should be serializable; skip a malformed value.
+      }
+    } else if (part.kind === "tool_result") {
+      searchParts.push(part.text.slice(0, 2000)); // cap per-message tool output
+    }
+  }
+  const searchText = searchParts.join(" \n ");
+
+  return [
+    sessionId,
+    `${sessionId}-${msg.index}`,  // synthetic UUID
+    null,
+    msg.role,
+    null,
+    msg.timestamp ?? null,
+    msg.index,
+    searchText,
+    msg.inputTokens ?? null,
+    msg.outputTokens ?? null,
+    msg.cacheCreationTokens ?? null,
+    msg.cacheReadTokens ?? null,
+    msg.model ?? null,
+  ];
 }
 
 /** Rebuild the entire search index from scratch (scan all files). */

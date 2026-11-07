@@ -58,12 +58,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   statusBar.show();
   context.subscriptions.push(statusBar);
 
-  // Init DB
-  await initDb(context);
+  // Init DB: node:sqlite where the host has it (VS Code 1.101+), sql.js otherwise.
+  const engine = await initDb(context);
+  console.log(`[claude-history] database engine: ${engine === "native" ? "node:sqlite" : "sql.js"}`);
 
   // Durable, multi-window-safe store for user flags (pinned/archived).
-  // The sql.js DB is a shared, last-writer-wins cache; flags must not live
-  // there as the source of truth. Seed once from any pre-existing DB flags.
+  // The DB is a rebuildable cache (with sql.js, a shared last-writer-wins
+  // file); flags must not live there as the source of truth. Seed once from
+  // any pre-existing DB flags.
   initSessionFlags(context.globalState);
   seedFlagsFromDbIfEmpty();
   applyFlagsToDb();

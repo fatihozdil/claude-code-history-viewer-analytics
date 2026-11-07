@@ -127,7 +127,7 @@ test("applyFlagsToDb writes nothing when the database already matches globalStat
       get: (key: string, fallback: unknown) => (store.has(key) ? store.get(key) : fallback),
       update: async (key: string, value: unknown) => { store.set(key, value); },
     } as any);
-    const totalChanges = () => Number(getDb().exec("SELECT total_changes();")[0].values[0][0]);
+    const totalChanges = () => Number(dbGet("SELECT total_changes() AS n")?.n);
 
     applyFlagsToDb();
     assert.equal(dbGet("SELECT pinned FROM sessions WHERE session_id = 's1'")?.pinned, 1, "the first pass applies the pin");
