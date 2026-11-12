@@ -21,8 +21,8 @@ import { BackupContentProvider } from "./diff/backupContentProvider.js";
 import type { SessionMeta } from "./claude/types.js";
 import { resolveQuota, resolveUsagePollMs } from "./services/quota.js";
 import { deepseekUsageSummary } from "./services/analytics.js";
-import { readAgyUsage } from "./agy/usage.js";
-import { readCodexUsage } from "./codex/usage.js";
+import { readAgyUsageCached, readCodexUsageCached } from "./services/localUsageCache.js";
+import type { CodexUsage } from "./codex/usage.js";
 import { OUTPUT } from "./logging.js";
 
 let statusBar: vscode.StatusBarItem;
@@ -101,7 +101,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await incrementalIndex(historyRoots, maxSizeBytes);
       applyFlagsToDb();
       browserProvider.refresh();
-      updateQuotaStatus(quotaItem);
+      updateQuotaStatus(quotaItem, { fresh: true });
       statusBar.text = "$(check) Ready";
       setTimeout(() => (statusBar.text = ""), 3000);
     }),
@@ -116,7 +116,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       });
       applyFlagsToDb();
       browserProvider.refresh();
-      updateQuotaStatus(quotaItem);
+      updateQuotaStatus(quotaItem, { fresh: true });
       AnalyticsPanel.current?.refresh({ silent: true });
       statusBar.text = "$(check) Index rebuilt";
       setTimeout(() => (statusBar.text = ""), 3000);
@@ -472,7 +472,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     quotaTimer = setInterval(() => updateQuotaStatus(quotaItem, { live: true }), pollMs);
   }
 
-  async function updateQuotaStatus(item: vscode.StatusBarItem, opts?: { live?: boolean }): Promise<void> {
+  async function updateQuotaStatus(
+    item: vscode.StatusBarItem,
+    opts?: { live?: boolean; fresh?: boolean },
+  ): Promise<void> {
     const generation = ++quotaUpdateGeneration;
     try {
       const quotaConfig = vscode.workspace.getConfiguration("claudeHistory.quota");
@@ -491,8 +494,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         ...(pollMs !== null ? { softTtlMs: pollMs } : {}),
         allowLive: opts?.live === true && pollMs !== null && providers.includes("claude"),
       });
-      const agyUsage = providers.includes("agy") ? await readAgyUsage(agyDir) : null;
-      const codexUsage = providers.includes("codex") ? await readCodexUsage(codexDir) : null;
+      // Session-list repaints reuse a recent Codex/Antigravity reading instead of
+      // rescanning local files and re-probing the RPC. Live polls, activation and
+      // explicit refreshes (opts.live / opts.fresh) always read again.
+      const fresh = opts?.live === true || opts?.fresh === true;
+      const agyUsage = providers.includes("agy") ? await readAgyUsageCached(agyDir, { fresh }) : null;
+      const codexUsage = providers.includes("codex") ? await readCodexUsageCached(codexDir, { fresh }) : null;
       // The full analytics aggregation is a multi-second synchronous sql.js
       // scan on a warm DB; it is only needed here to derive the DeepSeek
       // entry, so skip it entirely unless DeepSeek is actually configured
@@ -581,7 +588,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return ms > 0 ? `in ${fmtDuration(ms)}` : iso;
   }
 
-  function codexTooltipLine(u: Awaited<ReturnType<typeof readCodexUsage>>): string {
+  function codexTooltipLine(u: CodexUsage | null): string {
     if (!u) return "";
     const parts = [
       `${Math.round(u.primaryRemainingPct)}% remaining (${codexWindowShort(u.primaryWindowMinutes, "5h")})${fmtResetSeconds(u.primaryResetsAt)}`,

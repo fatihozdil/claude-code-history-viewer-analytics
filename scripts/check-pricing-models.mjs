@@ -19,7 +19,7 @@ function extractModels(html) {
   const found = new Set();
   for (const match of text.matchAll(/\b(?:gpt|gemini|deepseek)-[a-z0-9][a-z0-9._-]*/gi)) {
     const model = normalize(match[0]);
-    if (/^gpt-(?:4|5)/.test(model)) found.add(model);
+    if (/^gpt-\d/.test(model)) found.add(model);
     else if (model.startsWith("deepseek-")) found.add(model);
     else if (model.startsWith("gemini-") && !/(?:image|audio|tts|live|translate|computer-use)/.test(model)) found.add(model);
   }

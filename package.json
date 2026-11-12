@@ -2,7 +2,7 @@
   "name": "claude-code-history-search-analytics",
   "displayName": "Claude & Codex History Search Analytics",
   "description": "Browse, search, inspect, analyze, and resume Claude Code, Codex and Antigravity conversations directly inside VS Code.",
-  "version": "1.14.0",
+  "version": "1.15.0",
   "publisher": "Fatih-Ozdil",
   "license": "MIT",
   "icon": "media/icon.png",
@@ -248,6 +248,21 @@
           "type": "boolean",
           "default": false,
           "description": "Show archived sessions in the list by default."
+        },
+        "claudeHistory.defaultClickAction": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "claudeTab",
+            "terminal"
+          ],
+          "enumDescriptions": [
+            "Open the conversation in the viewer.",
+            "Open the session in a Claude Code tab (Claude sessions only; other providers open in the viewer).",
+            "Resume the session in a terminal."
+          ],
+          "default": "viewer",
+          "description": "What a plain click on a session in the sidebar does. The right-click menu always offers every action. Clicking a search result still opens the viewer at the matching message."
         }
       }
     }

@@ -20,6 +20,12 @@ const sonnet5Price = (): ModelPrice => beforeSonnet5Increase() ? p(2, 10, 0.2, 2
 // Ordered most-specific-first. SQL is generated from this same table so chat
 // and analytics cannot silently drift apart again.
 const RULES: PriceRule[] = [
+  // OpenAI GPT-6 family, standard rates from the flagship table (cache write = 30m write).
+  { test: includes("gpt-6.1", "sol"), sql: "model LIKE '%gpt-6.1%' AND model LIKE '%sol%'", price: p(2, 10, 0.1, 2.5) },
+  { test: includes("gpt-6.1", "terra"), sql: "model LIKE '%gpt-6.1%' AND model LIKE '%terra%'", price: p(1, 5, 0.05, 1.25) },
+  { test: includes("gpt-6", "astra"), sql: "model LIKE '%gpt-6%' AND model LIKE '%astra%'", price: p(10, 50, 1, 12.5) },
+  { test: includes("gpt-6", "luna"), sql: "model LIKE '%gpt-6%' AND model LIKE '%luna%'", price: p(0.1, 0.5, 0.01, 0.125) },
+
   // OpenAI current flagship families (standard, short-context rates).
   { test: includes("gpt-5.6", "sol"), sql: "model LIKE '%gpt-5.6%' AND model LIKE '%sol%'", price: p(5, 30, 0.5, 6.25) },
   { test: includes("gpt-5.6", "terra"), sql: "model LIKE '%gpt-5.6%' AND model LIKE '%terra%'", price: p(2.5, 15, 0.25, 3.125) },
@@ -59,6 +65,13 @@ const RULES: PriceRule[] = [
 
   // Anthropic: keep legacy generations distinct from current aliases.
   { test: (m) => m.includes("opus-4-1") || m.includes("opus-4-202") || m.endsWith("opus-4"), sql: "model LIKE '%opus-4-1%' OR model LIKE '%opus-4-202%' OR model = 'claude-opus-4'", price: p(15, 75, 1.5, 18.75) },
+  // 5.1 and 5.5 generations have their own cache-hit rates (Fable/Mythos 5.1: 0.025x; Opus/Sonnet 5.5: 0.05x).
+  { test: (m) => m.includes("fable-5-1") || m.includes("mythos-5-1"), sql: "model LIKE '%fable-5-1%' OR model LIKE '%mythos-5-1%'", price: p(10, 50, 0.25, 12.5) },
+  { test: includes("opus-5-5"), sql: "model LIKE '%opus-5-5%'", price: p(4, 20, 0.2, 5) },
+  { test: includes("sonnet-5-5"), sql: "model LIKE '%sonnet-5-5%'", price: p(2, 10, 0.1, 2.5) },
+  // Haiku 5.5 is tiered by prompt length; this is the <=100,000-token tier. Usage rows carry token
+  // totals, not per-prompt length, so longer prompts are priced at this tier too (a known under-count).
+  { test: includes("haiku-5-5"), sql: "model LIKE '%haiku-5-5%'", price: p(0.1, 0.5, 0.01, 0.125) },
   { test: includes("opus"), sql: "model LIKE '%opus%'", price: p(5, 25, 0.5, 6.25) },
   { test: includes("sonnet-5"), sql: "model LIKE '%sonnet-5%'", price: sonnet5Price },
   { test: includes("sonnet"), sql: "model LIKE '%sonnet%'", price: p(3, 15, 0.3, 3.75) },
@@ -83,6 +96,7 @@ export function priceForModel(model: string | null | undefined): ModelPrice {
 export function hasExplicitPriceForModel(model: string): boolean {
   const normalized = model.toLowerCase();
   const knownFamilies = [
+    /^(?:gpt-6\.1-(?:sol|terra)|gpt-6-(?:astra|luna))(?:-|$)/,
     /^gpt-5\.6-(sol|terra|luna)(?:-|$)/,
     /^gpt-5\.5(?:-pro)?(?:-|$)/,
     /^gpt-5\.4(?:-(?:mini|nano|pro|codex|cyber))?(?:-|$)/,
@@ -93,7 +107,7 @@ export function hasExplicitPriceForModel(model: string): boolean {
     /^gpt-4o(?:-mini)?(?:-|$)/,
     /^gemini-(?:3\.5-flash|3\.1-(?:pro|flash-lite)|3-flash|2\.5-(?:pro|flash|flash-lite)|2\.0-(?:flash|flash-lite)|1\.5-(?:pro|flash))(?:-|$)/,
     /^deepseek-(?:v4-(?:flash|pro)|chat|reasoner)(?:-|$)/,
-    /^claude-(?:opus-(?:4-[5-8]|4-1|4)|sonnet-(?:5|4-[456])|haiku-(?:4-5|3-5)|3-5-haiku|fable-5|mythos-5)(?:-|$)/,
+    /^claude-(?:opus-(?:5(?:-5)?|4-[5-8]|4-1|4)|sonnet-(?:5(?:-5)?|4(?:-[456])?)|haiku-(?:5-5|4-5|3-5)|3-5-haiku|fable-5(?:-1)?|mythos-5(?:-1)?)(?:-|$)/,
   ];
   return knownFamilies.some((pattern) => pattern.test(normalized));
 }

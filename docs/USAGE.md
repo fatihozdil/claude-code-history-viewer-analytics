@@ -21,7 +21,10 @@ Each card shows:
 - **Cost** — shown when the session's JSONL includes `costUSD` data (not estimated from tokens)
 - **Lines changed** — `+added / -removed` from file-editing tool calls
 
-**Click a card** to open the conversation viewer. **Right-click** (or use the hover icons) for:
+**Click a card** to open the conversation viewer. To make a click resume the session instead, set
+`claudeHistory.defaultClickAction` to `claudeTab` (Open in Claude Tab, Claude sessions only) or
+`terminal` (Resume in Terminal). Clicking a search result always opens the viewer at the matching message.
+**Right-click** (or use the hover icons) for:
 
 - **Open Conversation**
 - **Resume in Terminal** — opens a new integrated terminal and runs `claude --resume`
