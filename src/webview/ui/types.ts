@@ -81,6 +81,7 @@ export type CommandMessage =
   | { command: "toggleCompact" }
   | { command: "toggleArchived" }
   | { command: "openSession"; sessionId: string; msgOrdinal?: number; highlightTerm?: string }
+  | { command: "activateSession"; sessionId: string }
   | { command: "openSubagent"; filePath: string; title: string }
   | { command: "getSubagents"; sessionId: string }
   | { command: "archive"; sessionId: string }

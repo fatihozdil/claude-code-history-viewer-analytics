@@ -2,6 +2,19 @@
 
 All notable changes to this extension are documented in this file.
 
+## [1.15.0] - 2026-11-12
+
+### Added
+- **Choose what a click on a session does** - New `claudeHistory.defaultClickAction` setting: `viewer` (the default, unchanged), `claudeTab`, or `terminal`. It applies to plain clicks on a session in the sidebar. The right-click menu still offers every action, and clicking a search result still opens the viewer at the matching message. "Open in Claude Tab" applies to Claude sessions only; Codex and Antigravity sessions open in the viewer under that setting. ([#8](https://github.com/fatihozdil/claude-code-history-viewer-analytics/issues/8))
+
+### Changed
+- **Status bar refreshes reuse recent Codex and Antigravity readings** - Codex usage (a scan of local session files) and Antigravity usage (a process probe and localhost RPC) were re-read on every status bar refresh, even for session-list repaints that do not change them. They are now cached for 60 seconds (Codex) and 30 seconds (Antigravity). Live polls, startup, and the Refresh and Reindex commands always read fresh, and the Usage Analytics panel always reads fresh and updates the shared reading. ([#15](https://github.com/fatihozdil/claude-code-history-viewer-analytics/issues/15))
+
+### Fixed
+- **"Show archived" now works during a search** - Toggling it while a search was active flipped the button but left the results unchanged, so archived conversations could only be searched after clearing the search. Search now re-runs with the toggle, and so do Set Project, Set Provider, Archive, the fork and branch actions. Search also uses the same archived scope as the list: with "Show archived" on, it returns archived conversations only, instead of archived plus active ones. ([#17](https://github.com/fatihozdil/claude-code-history-viewer-analytics/issues/17))
+- **GPT-6 models are priced** - `gpt-6.1-sol`, `gpt-6.1-terra`, `gpt-6-astra`, and `gpt-6-luna` had no pricing rule and were counted at $0. They now use the standard rates from the OpenAI pricing page.
+- **Claude 5.5 models and the 5.1 cache rates are priced correctly** - Opus 5.5, Sonnet 5.5, and Haiku 5.5 used the generic family rates, and Fable 5.1 and Mythos 5.1 used the Fable 5 cache-hit rate. Haiku 5.5 uses its `<=100,000`-token tier, since usage rows do not record prompt length.
+
 ## [1.14.0] - 2026-11-07
 
 ### Fixed

@@ -176,6 +176,8 @@ export function App() {
           subagentCache={subagentCache}
           onOpen={(card) =>
             post(
+              // A search hit opens the viewer at the matching message. A plain
+              // click follows claudeHistory.defaultClickAction on the host.
               card.matchOrdinal !== undefined
                 ? {
                     command: "openSession",
@@ -183,7 +185,7 @@ export function App() {
                     msgOrdinal: card.matchOrdinal,
                     highlightTerm: state.searchQuery,
                   }
-                : { command: "openSession", sessionId: card.sessionId },
+                : { command: "activateSession", sessionId: card.sessionId },
             )
           }
           onOpenSubagent={(filePath, title) => post({ command: "openSubagent", filePath, title })}

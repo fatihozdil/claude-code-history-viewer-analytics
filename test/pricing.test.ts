@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import initSqlJs from "sql.js";
-import { priceForModel, costForTokens, MESSAGE_COST_SQL } from "../src/services/pricing.js";
+import { priceForModel, costForTokens, MESSAGE_COST_SQL, hasExplicitPriceForModel } from "../src/services/pricing.js";
 
 test("priceForModel matches opus by substring", () => {
   assert.equal(priceForModel("claude-opus-4-8").input, 5);
@@ -38,6 +38,39 @@ test("priceForModel covers current GPT variants without generic fallback collisi
   assert.equal(priceForModel("gpt-5.4-mini").output, 4.5);
   assert.equal(priceForModel("gpt-5-mini").input, 0.25);
   assert.equal(priceForModel("gpt-5-nano").output, 0.4);
+});
+
+test("priceForModel prices the 5.5 and 5.1 Claude generations with their own cache rates", () => {
+  // Opus 5.5: $4 / $20, 5m write $5, cache hit $0.20 (not the generic Opus cache rate).
+  assert.deepEqual(priceForModel("claude-opus-5-5"), { input: 4, output: 20, cacheWrite: 5, cacheRead: 0.2 });
+  // Sonnet 5.5: $2 / $10, 5m write $2.50, cache hit $0.10.
+  assert.deepEqual(priceForModel("claude-sonnet-5-5"), { input: 2, output: 10, cacheWrite: 2.5, cacheRead: 0.1 });
+  // Haiku 5.5: <=100k-token tier, $0.10 / $0.50, 5m write $0.125, cache hit $0.01.
+  assert.deepEqual(priceForModel("claude-haiku-5-5"), { input: 0.1, output: 0.5, cacheWrite: 0.125, cacheRead: 0.01 });
+  // Fable/Mythos 5.1 cache hit is 0.025x; Fable 5 keeps its 0.1x hit rate.
+  assert.equal(priceForModel("claude-fable-5-1").cacheRead, 0.25);
+  assert.equal(priceForModel("claude-mythos-5-1").cacheRead, 0.25);
+  assert.equal(priceForModel("claude-fable-5").cacheRead, 1);
+});
+
+test("priceForModel prices the GPT-6 family instead of falling through to zero", () => {
+  assert.deepEqual(priceForModel("gpt-6.1-sol"), { input: 2, output: 10, cacheWrite: 2.5, cacheRead: 0.1 });
+  assert.deepEqual(priceForModel("gpt-6.1-terra"), { input: 1, output: 5, cacheWrite: 1.25, cacheRead: 0.05 });
+  assert.deepEqual(priceForModel("gpt-6-astra"), { input: 10, output: 50, cacheWrite: 12.5, cacheRead: 1 });
+  assert.deepEqual(priceForModel("gpt-6-luna"), { input: 0.1, output: 0.5, cacheWrite: 0.125, cacheRead: 0.01 });
+  assert.notDeepEqual(priceForModel("gpt-6-luna"), priceForModel("unknown-model"));
+});
+
+test("hasExplicitPriceForModel recognises the new families and not generic names", () => {
+  for (const model of [
+    "gpt-6.1-sol", "gpt-6-astra", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5",
+    "claude-sonnet-4", "claude-sonnet-4-6", "claude-haiku-5-5", "claude-fable-5-1", "claude-mythos-5-1",
+  ]) {
+    assert.equal(hasExplicitPriceForModel(model), true, model);
+  }
+  for (const model of ["claude-opus-3", "claude-sonnet-3-7", "gemini-embedding-001", "deepseek-harness"]) {
+    assert.equal(hasExplicitPriceForModel(model), false, model);
+  }
 });
 
 test("costForTokens computes dollar cost from token mix", () => {
@@ -90,8 +123,10 @@ test("analytics SQL stays identical to TypeScript pricing for supported models",
   db.run("CREATE TABLE messages(model TEXT, input_tokens INTEGER, output_tokens INTEGER, cache_creation_tokens INTEGER, cache_read_tokens INTEGER)");
   const models = [
     "claude-opus-4-8", "claude-opus-4-1", "claude-sonnet-5", "claude-sonnet-4-6",
-    "claude-haiku-4-5", "claude-3-5-haiku-20241022", "claude-fable-5",
+    "claude-haiku-4-5", "claude-3-5-haiku-20241022", "claude-fable-5", "claude-fable-5-1",
+    "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5",
     "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4-mini",
+    "gpt-6.1-sol", "gpt-6.1-terra", "gpt-6-astra", "gpt-6-luna",
     "gpt-5.3-codex", "gpt-5-mini", "gpt-4.1", "gpt-4o-mini",
     "gemini-3.5-flash", "gemini-3.1-pro", "gemini-3-flash", "gemini-2.5-pro",
     "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash",

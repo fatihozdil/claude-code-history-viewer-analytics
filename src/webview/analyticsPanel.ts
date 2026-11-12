@@ -4,8 +4,7 @@ import { randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { buildAnalytics, type AnalyticsData } from "../services/analytics.js";
 import { resolveQuota, resolveUsagePollMs } from "../services/quota.js";
-import { readCodexUsage } from "../codex/usage.js";
-import { readAgyUsage } from "../agy/usage.js";
+import { readAgyUsageCached, readCodexUsageCached } from "../services/localUsageCache.js";
 import { resolveAgyDir, resolveCodexDir } from "../discovery/paths.js";
 import { PROVIDER_ICON_MARKUP } from "./providerIcons.js";
 import { createPollTimer, ANALYTICS_REFRESH_MS, type PollTimer } from "../services/pollTimer.js";
@@ -165,7 +164,14 @@ export class AnalyticsPanel {
       const home = os.homedir();
       const codexDir = resolveCodexDir(config.get("codexDirPath", ""), home);
       const agyDir = resolveAgyDir(config.get("agyDirPath", ""), home);
-      const [codex, agy] = await Promise.all([readCodexUsage(codexDir), readAgyUsage(agyDir)]);
+      // The dashboard always asks for a fresh local reading, on every refresh
+      // (button, poll, or watcher pass), and the result also updates the shared
+      // cache the status bar reads from. A panel that is open therefore bypasses
+      // the cache on each refresh by design.
+      const [codex, agy] = await Promise.all([
+        readCodexUsageCached(codexDir, { fresh: true }),
+        readAgyUsageCached(agyDir, { fresh: true }),
+      ]);
       const data = buildAnalytics(quota, undefined, {
         ...(codex ? { codex } : {}),
         ...(agy ? { agy } : {}),

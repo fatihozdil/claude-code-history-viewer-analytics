@@ -10,6 +10,7 @@ import {
 import { readSubagents } from "../claude/subagentMeta.js";
 import { dbGet } from "../storage/db.js";
 import { OUTPUT } from "../logging.js";
+import { resolveClickAction } from "../services/sessionClickAction.js";
 
 const SUPPRESS_RENAME_CACHE_NOTICE_KEY = "claudeHistory.suppressRenameCacheNotice";
 
@@ -95,14 +96,14 @@ export class BrowserProvider implements vscode.WebviewViewProvider {
       case "setProject": {
         const projectPath = (msg.projectPath ?? null) as string | null;
         this._listState.set({ selectedProject: projectPath });
-        this._pushState();
+        await this._refreshView();
         break;
       }
 
       case "setProvider": {
         OUTPUT.info(`[perf] setProvider(${msg.providerFilter}) received`);
         this._listState.set({ providerFilter: msg.providerFilter as any });
-        this._pushState(recvAt);
+        await this._refreshView(recvAt);
         break;
       }
 
@@ -141,9 +142,17 @@ export class BrowserProvider implements vscode.WebviewViewProvider {
       case "toggleArchived": {
         const cur = this._listState.get().showArchived;
         this._listState.set({ showArchived: !cur });
-        this._pushState();
+        // Re-run an active search: a plain state push leaves the webview's
+        // search results untouched, so the toggle would otherwise do nothing.
+        await this._refreshView();
         break;
       }
+
+      case "activateSession":
+        if (sid) {
+          await this._activateSession(sid);
+        }
+        break;
 
       case "openSession":
         if (sid) {
@@ -160,7 +169,7 @@ export class BrowserProvider implements vscode.WebviewViewProvider {
       case "archive":
         if (sid) {
           setArchived(sid, true);
-          this._pushState();
+          await this._refreshView();
         }
         break;
 
@@ -187,28 +196,28 @@ export class BrowserProvider implements vscode.WebviewViewProvider {
       case "dismissFork":
         if (sid) {
           setForkDismissed(sid, true);
-          this._pushState();
+          await this._refreshView();
         }
         break;
 
       case "restoreFork":
         if (sid) {
           setForkDismissed(sid, false);
-          this._pushState();
+          await this._refreshView();
         }
         break;
 
       case "ungroupBranch":
         if (sid) {
           setBranchUngrouped(sid, true);
-          this._pushState();
+          await this._refreshView();
         }
         break;
 
       case "regroupBranch":
         if (sid) {
           setBranchUngrouped(sid, false);
-          this._pushState();
+          await this._refreshView();
         }
         break;
 
@@ -345,12 +354,40 @@ export class BrowserProvider implements vscode.WebviewViewProvider {
 
   // ── State push ────────────────────────────────────────
 
-  /** Re-run the active search (if any) so results reflect the latest data, else push the unfiltered list. */
-  private async _refreshView(): Promise<void> {
+  /**
+   * Re-run the active search (if any) so results reflect the latest data, else push the unfiltered list.
+   * Every action that changes what the list shows must go through here: the webview keeps its search
+   * results on a plain state push, so `_pushState()` alone would leave a search on stale results.
+   */
+  private async _refreshView(triggeredAt?: number): Promise<void> {
     if (this._activeSearchQuery) {
+      // The state push keeps the webview's search results (HOST_STATE skips
+      // sessions while searchActive) but updates the toolbar: archive toggle,
+      // provider picker and project dropdown.
+      this._pushState(triggeredAt);
       await this._runSearch(this._activeSearchQuery);
     } else {
-      this._pushState();
+      this._pushState(triggeredAt);
+    }
+  }
+
+  /**
+   * A plain click on a session card: runs the action chosen in claudeHistory.defaultClickAction.
+   * Resolves the provider first, because the Claude tab only applies to Claude sessions.
+   */
+  private async _activateSession(sessionId: string): Promise<void> {
+    const row = dbGet("SELECT provider FROM sessions WHERE session_id = ?", [sessionId]);
+    const provider = row ? String(row.provider) : "";
+    const setting = vscode.workspace.getConfiguration("claudeHistory").get<string>("defaultClickAction", "viewer");
+    switch (resolveClickAction(setting, provider)) {
+      case "claudeTab":
+        await vscode.commands.executeCommand("claudeHistory.resume.openInClaudeTab", await this._resumeMeta(sessionId));
+        break;
+      case "terminal":
+        await vscode.commands.executeCommand("claudeHistory.resume.run", await this._resumeMeta(sessionId));
+        break;
+      default:
+        await vscode.commands.executeCommand("claudeHistory.openSession", { sessionId });
     }
   }
 
@@ -365,7 +402,9 @@ export class BrowserProvider implements vscode.WebviewViewProvider {
       const results = runSearch({
         term: query,
         projectPath: selectedProject ?? undefined,
-        includeArchived: showArchived,
+        // Same scope as the list (listSessionCards): "Show archived" means archived
+        // conversations only, not archived plus active. Search and list must agree.
+        archivedOnly: showArchived,
         providerFilter,
       });
       // Collapse per-message hits down to one entry per session: keep the
